@@ -19,9 +19,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
-$exe  = Join-Path $root "skynet_gcc.exe"
-$ver  = Join-Path $root "verify_gcc.exe"
+$exe  = Join-Path $root "skynet.exe"
+$ver  = Join-Path $root "build\verify.exe"
 $work = Join-Path $root "build\crashtest"
+
+if (-not (Test-Path $exe) -or -not (Test-Path $ver)) {
+    Write-Host "building first (build.ps1 -Compiler gcc)" -ForegroundColor Yellow
+    & (Join-Path $root "build.ps1") -Compiler gcc
+}
 
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
 New-Item -ItemType Directory -Force $work | Out-Null
