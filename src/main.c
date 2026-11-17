@@ -156,6 +156,7 @@ static int cmd_run(const sk_opts *o)
     unsigned long written;
     char line[24];
     int recovered;
+    sk_u32 got;
     sk_u32 checkpoints;
     sk_u32 journals;
 
@@ -167,11 +168,17 @@ static int cmd_run(const sk_opts *o)
        --durable on a mission that can actually lose power. */
     sk_io_sync_mode(o->durable ? SK_SYNC_DEVICE : SK_SYNC_NONE);
 
-    if (!sk_arena_init(&arena, o->arena_bytes, SK_MEM_OS)) {
-        printf("[sky] arena allocation of %lu bytes failed\n",
-               (unsigned long)o->arena_bytes);
+    /* Degrade rather than fail: on a 640 KB DOS machine the default 8 MB
+       request cannot be met, and an error message would be the wrong
+       answer.  Halve until something fits, down to 32 KB. */
+    got = sk_arena_init_best(&arena, o->arena_bytes, 32UL * 1024UL, SK_MEM_OS);
+    if (got == 0) {
+        printf("[sky] arena allocation failed, even 32 KB\n");
         return 3;
     }
+    if (got != o->arena_bytes)
+        printf("[sky] arena: %lu of %lu bytes granted\n",
+               (unsigned long)got, (unsigned long)o->arena_bytes);
 
     sk_clock_init(&clk);
     if (!sk_vault_open(&vault, o->dir)) {

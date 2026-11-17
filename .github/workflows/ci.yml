@@ -234,16 +234,52 @@ jobs:
           set -e
           # $HOME, not /opt: the runner user cannot create directories under
           # /opt, which is what made the first version of this job fail.
-          # -f so an HTTP error is a failure instead of a saved error page,
-          # --retry-all-errors because the asset host drops long transfers.
-          curl -fL --retry 5 --retry-all-errors --retry-delay 3 \
-            -o "$RUNNER_TEMP/ow.tar.xz" \
-            https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz
-          ls -la "$RUNNER_TEMP/ow.tar.xz"
-          xz -t "$RUNNER_TEMP/ow.tar.xz"
+          #
+          # The release asset host drops this 148 MB transfer near the end,
+          # so curl's own --retry is not enough: it restarts from zero and
+          # hits the same drop.  The loop resumes with -C - and the exit
+          # condition is the ARCHIVE passing its integrity test, not curl's
+          # exit code.  A download we have not verified is not a download.
+          F="$RUNNER_TEMP/ow.tar.xz"
+          URL="https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz"
+          rm -f "$F"
+          ok=0
+          for i in 1 2 3 4 5 6 7 8; do
+            curl -fL -C - --retry 3 --retry-delay 2 -o "$F" "$URL" || true
+            if xz -t "$F" 2>/dev/null; then ok=1; echo "archive valid on attempt $i"; break; fi
+            echo "attempt $i incomplete: $(stat -c%s "$F" 2>/dev/null || echo 0) bytes"
+            sleep 2
+          done
+          test "$ok" = 1 || { echo "::error::could not obtain a valid OpenWatcom archive"; exit 1; }
+
           mkdir -p "$HOME/watcom"
-          tar xf "$RUNNER_TEMP/ow.tar.xz" -C "$HOME/watcom"
-          find "$HOME/watcom" -maxdepth 4 -name wcc -type f
+          tar xf "$F" -C "$HOME/watcom"
+          # The snapshot ships host binaries for many platforms (binl64 for
+          # Linux x64, bino64 for OS/2, binnt for Windows).  Pick the Linux
+          # one explicitly instead of taking whatever find returns first.
+          test -x "$HOME/watcom/binl64/wcc" || { echo "::error::no Linux host compiler"; ls "$HOME/watcom"; exit 1; }
+          "$HOME/watcom/binl64/wcc" -? 2>&1 | head -2 || true
+
+      - name: build 16-bit DOS binary
+        run: |
+          set -e
+          export WATCOM="$HOME/watcom"
+          export PATH="$WATCOM/binl64:$WATCOM/binl:$PATH"
+          export INCLUDE="$WATCOM/h"
+          mkdir -p build_dos
+          # wcc compiles ONE file per invocation: passing eight sources gives
+          # "E1139: Command line contains more than one file to compile" and
+          # produces no objects at all.  Unlike gcc, it needs a loop.
+          for f in main sk_math sk_arena sk_clock sk_vault sk_sched sk_io sk_selftest; do
+            echo "wcc src/$f.c"
+            wcc -ml -zq -Isrc -fo=build_dos/ "src/$f.c"
+          done
+          ls -la build_dos/*.o
+          wlink system dos name build_dos/skynet.exe file build_dos/main.o \
+              build_dos/sk_math.o build_dos/sk_arena.o build_dos/sk_clock.o \
+              build_dos/sk_vault.o build_dos/sk_sched.o build_dos/sk_io.o \
+              build_dos/sk_selftest.o
+          ls -la build_dos/skynet.exe
 
       - name: build 16-bit DOS binary
         run: |

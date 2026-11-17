@@ -218,6 +218,22 @@ static void sk_test_arena(void)
     sk_check("arena reset", sk_arena_mark(&a) == 0);
     (void)ok;
     sk_arena_done(&a);
+
+    /* degradation (invariant I6): an impossible request must produce a
+       smaller arena, not a failure */
+    {
+        sk_arena big;
+        sk_u32 got;
+        got = sk_arena_init_best(&big, 0xFFFFFFF0UL, 32UL * 1024UL, SK_MEM_OS);
+        sk_check("arena degrades instead of failing", got > 0);
+        sk_check("arena degradation is within bounds",
+                 got > 0 && got <= 0xFFFFFFF0UL);
+        if (got > 0) {
+            sk_check("degraded arena is usable",
+                     sk_arena_alloc(&big, 16) != SK_NULL);
+            sk_arena_done(&big);
+        }
+    }
 }
 
 int sk_selftest_run(void)

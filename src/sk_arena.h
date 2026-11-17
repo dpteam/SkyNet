@@ -35,6 +35,15 @@ typedef struct {
 } sk_arena;
 
 int    sk_arena_init(sk_arena *a, sk_u32 bytes, int backend);
+
+/* Ask for `want`, accept anything down to `least`, halving until it fits.
+   Returns the size actually obtained, or 0 if even `least` failed.
+   The return is sk_u32 and not int on purpose: an arena size does not fit
+   in a signed 32-bit int once it reaches the top of the range, and a
+   negative "success" is exactly the kind of bug that survives review.
+   This is invariant I6 in one function: degrade, do not fail. */
+sk_u32 sk_arena_init_best(sk_arena *a, sk_u32 want, sk_u32 least, int backend);
+
 int    sk_arena_attach(sk_arena *a, void *buffer, sk_u32 bytes);
 void   sk_arena_done(sk_arena *a);
 
