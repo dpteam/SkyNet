@@ -5,36 +5,26 @@
 # would leave a permanently yellow job that nobody reads.  This script is
 # how that was checked by hand before the job was trusted.
 #
-# Two things about OpenWatcom that cost real debugging time:
+# Three things about OpenWatcom that cost real debugging time:
 #   1. wcc compiles ONE file per invocation.  Passing eight sources gives
 #      "E1139: Command line contains more than one file to compile" seven
 #      times and no objects.  Unlike gcc, it needs a loop.
 #   2. The snapshot ships host binaries for many platforms (binl64 for
 #      Linux x64, bino64 for OS/2, binnt for Windows).  'find ... -name wcc'
-#      can return any of them, so the Linux one must be selected explicitly.
+#      can return any of them, so binl64 is selected explicitly.
+#   3. The download is flaky and must be verified with xz -t.  That logic
+#      lives in tools/fetch_watcom.sh and is NOT duplicated here: the first
+#      version of this script had its own copy, which happily overwrote a
+#      verified 148 MB archive with a fresh truncated one.
 set -e
 
 WORK=${WORK:-/tmp/owtest}
-URL="https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz"
-EXPECTED=155531784
+cd "$(dirname "$0")/.."
 
-echo "== download"
-if [ ! -f "$WORK/ow.tar.xz" ] || [ "$(stat -c%s "$WORK/ow.tar.xz")" -ne "$EXPECTED" ]; then
-    mkdir -p "$WORK"
-    rm -f "$WORK/ow.tar.xz"
-    for i in 1 2 3 4 5 6 7 8; do
-        curl -fL -C - --retry 3 --retry-delay 2 -o "$WORK/ow.tar.xz" "$URL" || true
-        if xz -t "$WORK/ow.tar.xz" 2>/dev/null; then
-            echo "archive verified on attempt $i"
-            break
-        fi
-        echo "attempt $i incomplete ($(stat -c%s "$WORK/ow.tar.xz" 2>/dev/null || echo 0) bytes)"
-        sleep 2
-    done
-fi
-xz -t "$WORK/ow.tar.xz" || { echo "FAIL: archive still corrupt"; exit 1; }
-echo "archive is valid ($(stat -c%s "$WORK/ow.tar.xz") bytes)"
+echo "== obtain the toolchain"
+sh tools/fetch_watcom.sh "$WORK"
 
+echo
 echo "== extract"
 rm -rf "$WORK/opt"
 mkdir -p "$WORK/opt"
@@ -43,9 +33,7 @@ tar xf "$WORK/ow.tar.xz" -C "$WORK/opt"
 echo "== locate the LINUX host compiler"
 WATCOM="$WORK/opt"
 WCC="$WATCOM/binl64/wcc"
-if [ ! -x "$WCC" ]; then
-    WCC="$WATCOM/binl/wcc"
-fi
+[ -x "$WCC" ] || WCC="$WATCOM/binl/wcc"
 if [ ! -x "$WCC" ]; then
     echo "FAIL: no Linux host compiler in the snapshot"
     ls "$WATCOM" | head -20
@@ -53,20 +41,33 @@ if [ ! -x "$WCC" ]; then
 fi
 echo "wcc: $WCC"
 
+echo
 echo "== compile the core for 16-bit DOS, one file at a time"
-cd "$(dirname "$0")/.."
 export WATCOM
 export PATH="$WATCOM/binl64:$WATCOM/binl:$PATH"
 export INCLUDE="$WATCOM/h"
 rm -rf build_dos && mkdir -p build_dos
 
+fail=0
 for f in main sk_math sk_arena sk_clock sk_vault sk_sched sk_io sk_selftest; do
-    echo "  wcc $f.c"
-    wcc -ml -zq -Isrc -fo=build_dos/ "src/$f.c"
+    printf '  wcc %s.c ... ' "$f"
+    if wcc -ml -zq -Isrc -fo=build_dos/ "src/$f.c" >"build_dos/$f.log" 2>&1; then
+        echo ok
+    else
+        echo FAIL
+        grep -E 'Error|Warning' "build_dos/$f.log" | head -8
+        fail=$((fail + 1))
+    fi
 done
 
+if [ "$fail" -ne 0 ]; then
+    echo
+    echo "== $fail file(s) failed to compile for 16-bit"
+    exit 1
+fi
+
+echo
 echo "== link"
-ls -la build_dos/*.o
 wlink system dos name build_dos/skynet.exe file build_dos/main.o \
     build_dos/sk_math.o build_dos/sk_arena.o build_dos/sk_clock.o \
     build_dos/sk_vault.o build_dos/sk_sched.o build_dos/sk_io.o \
