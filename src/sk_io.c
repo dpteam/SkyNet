@@ -2,6 +2,24 @@
  *
  * SKYNET M0 / subsystem: core/io
  */
+/* Feature test macros must come before ANY header, so this block is the
+ * first thing in the file.
+ *
+ * Why it is needed: -std=c89 defines __STRICT_ANSI__, and under that glibc
+ * hides the POSIX declarations of fileno(), fsync() and ftruncate().  The
+ * code then compiles on Windows (which uses _commit/_chsize) and fails on
+ * Linux with "implicit declaration", which is exactly what CI found.
+ * Asking for POSIX.1-2008 explicitly is the correct fix, not a workaround.
+ *
+ * Windows and DOS are excluded: they do not have these functions at all,
+ * and defining the macro there only confuses their headers. */
+#if !defined(_WIN32) && !defined(__WIN32__) && !defined(__NT__) \
+    && !defined(__TURBOC__) && !defined(__BORLANDC__) && !defined(MSDOS)
+#  ifndef _POSIX_C_SOURCE
+#    define _POSIX_C_SOURCE 200809L
+#  endif
+#endif
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>

@@ -14,7 +14,6 @@ int main(int argc, char **argv)
     sk_clock c;
     FILE *f;
     unsigned long line, n, bad, dups, gaps, want;
-    int got;
     const char *path;
 
     path = (argc > 1) ? argv[1] : "primes.txt";

@@ -11,6 +11,10 @@ build/
 *.exp
 *.lib
 
+# the POSIX binary has no extension, so it needs naming explicitly
+/skynet
+/skynet32
+
 # ---- runtime state (this is data, not source) -------------------------
 state/
 skvtest/

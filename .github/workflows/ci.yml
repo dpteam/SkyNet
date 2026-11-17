@@ -99,7 +99,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y gcc-multilib
 
       - name: build 32-bit
-        run: make 32 CFLAGS="-std=c89 -pedantic -Wall -Wextra -Werror -O2"
+        run: |
+          set -e
+          # build/verify is needed by the crash test, so build it too
+          make all CFLAGS="-std=c89 -pedantic -Wall -Wextra -Werror -O2"
+          make 32 CFLAGS="-std=c89 -pedantic -Wall -Wextra -Werror -O2"
 
       - name: selftest 32-bit
         run: |
@@ -151,9 +155,11 @@ jobs:
           rm -rf build/rec && mkdir -p build/rec
           ./skynet run --quiet --max 3000 --dir build/rec/state --out build/rec/p.txt
           ./skynet run --quiet --max 6000 --dir build/rec/state --out build/rec/p.txt
-          # damage one slot the way a bad sector would
+          # damage one slot the way a bad sector would.
+          # octal escapes, not \x: /bin/sh is dash on Ubuntu and does not
+          # understand \xNN in printf.
           f=$(ls build/rec/state/STATE.* | head -1)
-          printf '\xde\xad\xbe\xef' | dd of="$f" bs=1 seek=30 conv=notrunc status=none
+          printf '\336\255\276\357' | dd of="$f" bs=1 seek=30 conv=notrunc status=none
           echo "damaged $f, expecting recovery from the other slot"
           ./skynet recover --dir build/rec/state
 
@@ -206,26 +212,46 @@ jobs:
 
   # --------------------------------------------------------------- dos
   # DOS is the real target, so it deserves a real 16-bit compiler.
-  # This job is best-effort: it needs a container image, and if that image
-  # is unavailable the workflow must not go red for it.  The authoritative
-  # DOS check is still a manual run on FreeDOS under hv86 / DOSBox.
+  #
+  # Why a tarball and not a container: there is no published OpenWatcom
+  # container image on ghcr.io (the first version of this job tried one and
+  # failed with "not found").  The upstream project publishes a snapshot
+  # tarball, which needs no registry, no docker daemon and no credentials.
+  #
+  # This job is best effort: the authoritative DOS check is still a manual
+  # run on FreeDOS under hv86 / DOSBox.  What this proves is narrower but
+  # still worth having: the sources compile with a 16-bit compiler, so
+  # nothing in the core accidentally requires 32-bit ints or a 32-bit ABI.
   dos-build:
     name: build / dos-16bit (best effort)
     runs-on: ubuntu-latest
     continue-on-error: true
-    container:
-      image: ghcr.io/open-watcom/open-watcom-v2:latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: build with OpenWatcom (16-bit DOS, large model)
+      - name: install OpenWatcom
         run: |
           set -e
+          curl -sL -o /tmp/ow.tar.xz \
+            https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz
+          mkdir -p /opt/watcom
+          tar xf /tmp/ow.tar.xz -C /opt/watcom --strip-components=0
+          # the snapshot unpacks to a versioned directory; find the bin dir
+          find /opt/watcom -maxdepth 3 -name wcc -type f | head -5
+
+      - name: build 16-bit DOS binary
+        run: |
+          set -e
+          WATCOM=$(dirname "$(dirname "$(find /opt/watcom -maxdepth 3 -name wcc -type f | head -1)")")
+          export WATCOM
+          export PATH="$WATCOM/binl64:$WATCOM/binl:$PATH"
+          export INCLUDE="$WATCOM/h"
           mkdir -p build_dos
           wcc -ml -zq -Isrc -fo=build_dos/ src/main.c src/sk_math.c \
               src/sk_arena.c src/sk_clock.c src/sk_vault.c src/sk_sched.c \
               src/sk_io.c src/sk_selftest.c
           wlink system dos name build_dos/skynet.exe file build_dos/*.obj
+          ls -la build_dos/
 
       - name: upload DOS binary
         uses: actions/upload-artifact@v4

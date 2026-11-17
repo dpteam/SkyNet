@@ -130,7 +130,10 @@ def main():
 
     for name, data in (("skynet-logo.svg", logo), ("skynet-icon.svg", icon)):
         path = os.path.join(OUT_DIR, name)
-        with open(path, "w", encoding="utf-8") as f:
+        # newline="\n" so the file is byte-identical on Windows and Linux.
+        # Without it Python writes CRLF on Windows, and the CI check that
+        # regenerates the logo would see a spurious diff.
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(data)
         print(f"wrote {path} ({len(data)} bytes)")
 
