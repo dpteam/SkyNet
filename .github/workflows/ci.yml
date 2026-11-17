@@ -229,36 +229,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: cache OpenWatcom
+        id: owcache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ow.tar.xz
+          # The key includes the release tag.  'Current-build' is rebuilt
+          # periodically, so this cache can go stale in a harmless way: a
+          # stale archive still compiles, it is just an older snapshot.
+          key: openwatcom-snapshot-v1
+
       - name: install OpenWatcom
         run: |
           set -e
-          # $HOME, not /opt: the runner user cannot create directories under
-          # /opt, which is what made the first version of this job fail.
-          #
-          # The release asset host drops this 148 MB transfer near the end,
-          # so curl's own --retry is not enough: it restarts from zero and
-          # hits the same drop.  The loop resumes with -C - and the exit
-          # condition is the ARCHIVE passing its integrity test, not curl's
-          # exit code.  A download we have not verified is not a download.
-          F="$RUNNER_TEMP/ow.tar.xz"
-          URL="https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz"
-          rm -f "$F"
-          ok=0
-          for i in 1 2 3 4 5 6 7 8; do
-            curl -fL -C - --retry 3 --retry-delay 2 -o "$F" "$URL" || true
-            if xz -t "$F" 2>/dev/null; then ok=1; echo "archive valid on attempt $i"; break; fi
-            echo "attempt $i incomplete: $(stat -c%s "$F" 2>/dev/null || echo 0) bytes"
-            sleep 2
-          done
-          test "$ok" = 1 || { echo "::error::could not obtain a valid OpenWatcom archive"; exit 1; }
+          # The download is flaky and the details matter; they live in
+          # tools/fetch_watcom.sh so the same logic can be run by hand.
+          # Exit condition is xz -t passing, never curl's exit code.
+          sh tools/fetch_watcom.sh "$RUNNER_TEMP"
 
           mkdir -p "$HOME/watcom"
-          tar xf "$F" -C "$HOME/watcom"
+          tar xf "$RUNNER_TEMP/ow.tar.xz" -C "$HOME/watcom"
           # The snapshot ships host binaries for many platforms (binl64 for
           # Linux x64, bino64 for OS/2, binnt for Windows).  Pick the Linux
           # one explicitly instead of taking whatever find returns first.
           test -x "$HOME/watcom/binl64/wcc" || { echo "::error::no Linux host compiler"; ls "$HOME/watcom"; exit 1; }
-          "$HOME/watcom/binl64/wcc" -? 2>&1 | head -2 || true
 
       - name: build 16-bit DOS binary
         run: |
