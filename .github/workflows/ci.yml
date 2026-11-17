@@ -232,20 +232,29 @@ jobs:
       - name: install OpenWatcom
         run: |
           set -e
-          curl -sL -o /tmp/ow.tar.xz \
+          # $HOME, not /opt: the runner user cannot create directories under
+          # /opt, which is what made the first version of this job fail.
+          # -f so an HTTP error is a failure instead of a saved error page,
+          # --retry-all-errors because the asset host drops long transfers.
+          curl -fL --retry 5 --retry-all-errors --retry-delay 3 \
+            -o "$RUNNER_TEMP/ow.tar.xz" \
             https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz
-          mkdir -p /opt/watcom
-          tar xf /tmp/ow.tar.xz -C /opt/watcom --strip-components=0
-          # the snapshot unpacks to a versioned directory; find the bin dir
-          find /opt/watcom -maxdepth 3 -name wcc -type f | head -5
+          ls -la "$RUNNER_TEMP/ow.tar.xz"
+          xz -t "$RUNNER_TEMP/ow.tar.xz"
+          mkdir -p "$HOME/watcom"
+          tar xf "$RUNNER_TEMP/ow.tar.xz" -C "$HOME/watcom"
+          find "$HOME/watcom" -maxdepth 4 -name wcc -type f
 
       - name: build 16-bit DOS binary
         run: |
           set -e
-          WATCOM=$(dirname "$(dirname "$(find /opt/watcom -maxdepth 3 -name wcc -type f | head -1)")")
+          WCC=$(find "$HOME/watcom" -maxdepth 4 -name wcc -type f | head -1)
+          test -n "$WCC" || { echo "::error::wcc not found in the OpenWatcom snapshot"; exit 1; }
+          WATCOM=$(dirname "$(dirname "$WCC")")
           export WATCOM
           export PATH="$WATCOM/binl64:$WATCOM/binl:$PATH"
           export INCLUDE="$WATCOM/h"
+          echo "WATCOM=$WATCOM"
           mkdir -p build_dos
           wcc -ml -zq -Isrc -fo=build_dos/ src/main.c src/sk_math.c \
               src/sk_arena.c src/sk_clock.c src/sk_vault.c src/sk_sched.c \
