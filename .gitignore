@@ -1,0 +1,56 @@
+# ---- build output -----------------------------------------------------
+build/
+*.exe
+*.o
+*.obj
+*.map
+*.lst
+*.tds
+*.ilk
+*.pdb
+*.exp
+*.lib
+
+# ---- runtime state (this is data, not source) -------------------------
+state/
+skvtest/
+primes.txt
+*.SKT
+DATASET.IDX
+WAL.LOG
+STATE.A
+STATE.B
+STATE.TMP
+
+# ---- generated evolution output ---------------------------------------
+source/gen_*/
+
+# ---- editors and OS ---------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- toolchain leftovers ---------------------------------------------
+*.bak
+*.orig
+*.rej
+__pycache__/
+*.pyc
+
+# ---- deliberately NOT ignored ----------------------------------------
+# refs/      - reference material, kept for provenance (see docs/00-index.md)
+# assets/    - logo and icon are part of the project identity
+# docs/      - the reasoning is the deliverable
+
+# refs/ ships reference binaries on purpose: TINY.EXE and TINY.BIN are the
+# baseline we must reproduce in M2, and the old builds are the provenance of
+# the earlier attempt.  The generic *.exe rule above must not eat them.
+!refs/**/*.exe
+!refs/**/*.EXE
+!refs/**/*.bin
+!refs/**/*.BIN
+
