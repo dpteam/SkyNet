@@ -68,10 +68,14 @@ fi
 
 echo
 echo "== link"
-wlink system dos name build_dos/skynet.exe file build_dos/main.o \
-    build_dos/sk_math.o build_dos/sk_arena.o build_dos/sk_clock.o \
-    build_dos/sk_vault.o build_dos/sk_sched.o build_dos/sk_io.o \
-    build_dos/sk_selftest.o
+# wlink does not take a bare list of object files: each needs the `file`
+# directive, and the syntax is one directive per argument.
+LINK_ARGS="system dos name build_dos/skynet.exe"
+for o in main sk_math sk_arena sk_clock sk_vault sk_sched sk_io sk_selftest; do
+    LINK_ARGS="$LINK_ARGS file build_dos/$o.o"
+done
+# shellcheck disable=SC2086
+wlink $LINK_ARGS
 
 ls -la build_dos/skynet.exe
 echo

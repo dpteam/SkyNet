@@ -14,7 +14,8 @@
  * Windows and DOS are excluded: they do not have these functions at all,
  * and defining the macro there only confuses their headers. */
 #if !defined(_WIN32) && !defined(__WIN32__) && !defined(__NT__) \
-    && !defined(__TURBOC__) && !defined(__BORLANDC__) && !defined(MSDOS)
+    && !defined(__TURBOC__) && !defined(__BORLANDC__) && !defined(MSDOS) \
+    && !defined(__DOS__) && !defined(__WATCOMC__)
 #  ifndef _POSIX_C_SOURCE
 #    define _POSIX_C_SOURCE 200809L
 #  endif
@@ -25,15 +26,28 @@
 #include <stdlib.h>
 #include "sk_io.h"
 
+/* One definition of "is this DOS", used by both the feature-test block
+ * above and the header block below.  Keeping two copies is how the first
+ * version shipped a bug: the guard listed MSDOS, OpenWatcom defines
+ * __WATCOMC__ and __DOS__ but NOT MSDOS, so sk_io.c silently compiled its
+ * POSIX branch with a DOS one-argument mkdir() and failed with E1151. */
+#if defined(__TURBOC__) || defined(__BORLANDC__) || defined(MSDOS) \
+    || defined(__DOS__) || (defined(__WATCOMC__) && !defined(_WIN32))
+#  define SK_IS_DOS 1
+#endif
+
 #if defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
 #  define SK_PLAT_WIN 1
 #  include <direct.h>
 #  include <io.h>
 #  include <windows.h>
-#elif defined(__TURBOC__) || defined(__BORLANDC__) || defined(MSDOS)
+#elif defined(SK_IS_DOS)
 #  define SK_PLAT_DOS 1
-#  include <dir.h>
+/* No <dir.h>: Turbo C 2.0 needs it for mkdir(), OpenWatcom does not ship it
+   and declares mkdir() in <io.h> instead.  <io.h> exists on both, so that
+   is the one include that is safe to use here. */
 #  include <io.h>
+#  include <sys/stat.h>
 #else
 #  define SK_PLAT_POSIX 1
 #  include <unistd.h>
