@@ -141,13 +141,17 @@ SkyNet/
 
 | Job | Что доказывает |
 |---|---|
-| `build` × 5 | собирается gcc, clang, tcc, mingw и clang/macOS с `-Werror` |
-| `build-32bit` | 32-битная сборка **запускается** и проходит selftest и краш-тест |
-| `crash-test` | 15 убийств, режим `--durable`, восстановление после порчи слота |
-| `hygiene` | инварианты I1/I2/C89 не нарушены, и сам чекер не пустой |
-| `dos-build` | 16-бит DOS через OpenWatcom (best effort) |
+| `build` × 5 | gcc, clang, tcc, mingw, clang/macOS — все с `-Werror` |
+| `build-32bit` | 32-битный бинарник **запускается**: selftest + краш-тест |
+| `crash-test` | 15 убийств, `--durable`, восстановление после порчи слота |
+| `hygiene` | I1/I2/C89 + проверка, что сам чекер умеет падать |
+| `dos-build` | **настоящая 16-битная DOS-сборка**: OpenWatcom, 41 КБ `.exe` |
 
-Подробности и разбор найденных багов: [docs/02-ci.md](docs/02-ci.md).
+Артефакты: `skynet-linux-x86_64`, `-clang`, `-tcc`, `-i386`,
+`-windows-x86_64`, `-macos`, `-dos-16bit`.
+
+Последний прогон: **9 job'ов, 0 ошибок**, только предупреждения про
+устаревший Node.js 20 в самих actions.
 
 Артефакты после прогона: `skynet-linux-x86_64`, `skynet-linux-clang`,
 `skynet-linux-tcc`, `skynet-linux-i386`, `skynet-windows-x86_64`,
