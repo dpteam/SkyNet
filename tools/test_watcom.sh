@@ -95,7 +95,13 @@ echo
 echo "== link"
 # wlink does not take a bare list of object files: each needs the `file`
 # directive, and the syntax is one directive per argument.
-LINK_ARGS="system dos name build_dos/skynet.exe"
+#
+# stack=8192 is not cosmetic.  The default DOS stack is 2 KB, and the vault
+# layer puts a sk_vault (about 900 bytes: two 192-byte slot paths, a 128-byte
+# directory, a journal path and a scratch path) on the stack in every caller.
+# With selftest frames on top of that, 2 KB overflows and the program dies
+# with no output at all - which is exactly how the first DOS run failed.
+LINK_ARGS="system dos name build_dos/skynet.exe option stack=8192"
 for o in main sk_math sk_arena sk_clock sk_vault sk_sched sk_io sk_selftest; do
     LINK_ARGS="$LINK_ARGS file build_dos/$o.o"
 done

@@ -243,16 +243,27 @@ int sk_selftest_run(void)
 
     printf("SkyNet M0 selftest\n");
     printf("------------------\n");
+    fflush(stdout);
 
     sk_math_init();
+    printf("math...\n");
+    fflush(stdout);
     sk_test_math();
+
+    printf("clock...\n");
+    fflush(stdout);
     sk_test_clock();
+
+    printf("arena...\n");
+    fflush(stdout);
     sk_test_arena();
 
     printf("vault...\n");
+    fflush(stdout);
     sk_check("vault crash/recovery", sk_vault_selftest() == 1);
 
     printf("------------------\n");
     printf("%d passed, %d failed\n", sk_pass, sk_fail);
+    fflush(stdout);
     return sk_fail;
 }

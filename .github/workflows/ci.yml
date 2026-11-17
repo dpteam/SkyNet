@@ -1,4 +1,4 @@
-name: ci
+﻿name: ci
 
 # The point of this workflow is not a green badge.  It is the three things
 # that cannot be checked on one developer machine:
@@ -211,61 +211,63 @@ jobs:
           echo "logo is reproducible from the prime sequence"
 
   # --------------------------------------------------------------- dos
-  # DOS is the real target, so it deserves a real 16-bit compiler.
+  # DOS is the real target, so it gets a real 16-bit compiler AND a real
+  # run.  These are two different claims - "it compiles" and "it works" -
+  # and both are needed, but they live in one job on purpose: splitting
+  # them means passing the .exe through an artifact, and a job that
+  # downloads a missing artifact fails with a message that says nothing
+  # about the actual cause.
   #
   # Why a tarball and not a container: there is no published OpenWatcom
-  # container image on ghcr.io (the first version of this job tried one and
-  # failed with "not found").  The upstream project publishes a snapshot
-  # tarball, which needs no registry, no docker daemon and no credentials.
-  #
-  # This job is best effort: the authoritative DOS check is still a manual
-  # run on FreeDOS under hv86 / DOSBox.  What this proves is narrower but
-  # still worth having: the sources compile with a 16-bit compiler, so
-  # nothing in the core accidentally requires 32-bit ints or a 32-bit ABI.
-  dos-build:
-    name: build / dos-16bit (best effort)
+  # image on ghcr.io (the first version of this job tried one and failed
+  # with "not found").  Upstream publishes a snapshot tarball, which needs
+  # no registry, no docker daemon and no credentials.
+  dos:
+    name: dos / 16-bit build and run
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
       - name: cache OpenWatcom
-        id: owcache
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/ow.tar.xz
-          # The key includes the release tag.  'Current-build' is rebuilt
-          # periodically, so this cache can go stale in a harmless way: a
-          # stale archive still compiles, it is just an older snapshot.
+          # 'Current-build' is rebuilt upstream periodically, so this cache
+          # can go stale in a harmless way: an older snapshot still compiles.
           key: openwatcom-snapshot-v1
 
-      - name: install OpenWatcom
+      - name: install DOSBox
         run: |
-          set -e
-          # Download is verified with xz -t inside this script, because curl
-          # reports success on truncated transfers.  The archive is cached
-          # by the step above, so this normally costs nothing.
-          sh tools/fetch_watcom.sh "$RUNNER_TEMP"
+          sudo apt-get update
+          sudo apt-get install -y dosbox
 
       - name: build 16-bit DOS binary
         run: |
           set -e
           # The whole procedure lives in tools/test_watcom.sh, which is what
           # was run and debugged by hand.  CI calls the same script so the
-          # two cannot drift apart: three separate bugs (one-file-per-wcc,
-          # wrong host binary directory, wlink's file directive) were only
-          # found because this script could be run outside CI.
+          # two cannot drift apart: wcc compiles one file per invocation,
+          # the snapshot ships host binaries for many platforms, and wlink
+          # needs a `file` directive per object.  All three were found only
+          # because this script could be run outside CI.
           WORK="$RUNNER_TEMP" sh tools/test_watcom.sh
+          ls -la build_dos/skynet.exe
 
-      - name: report size
+      - name: build the host verifier
+        run: make all CFLAGS="-std=c89 -pedantic -Wall -Wextra -Werror -O2"
+
+      - name: DOS acceptance test
         run: |
           set -e
-          ls -la build_dos/skynet.exe
-          file build_dos/skynet.exe || true
+          # Runs the 16-bit binary in DOSBox and checks what only the real
+          # target can show: real-mode loading, a 16-bit size_t not
+          # truncating an 8 MB arena request, the vault working without
+          # fsync, and recovery resuming from a previous process's state.
+          sh tests/dos_test.sh
 
       - name: upload DOS binary
         uses: actions/upload-artifact@v4
         with:
           name: skynet-dos-16bit
           path: build_dos/skynet.exe
-          if-no-files-found: warn
+          if-no-files-found: error

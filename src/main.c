@@ -94,6 +94,13 @@ static int cmd_selftest(void)
 {
     int fails;
 
+    /* Unbuffered on purpose.  A self-test exists to find crashes, and a
+       buffered stdout loses everything when the program dies - which is
+       exactly what happened on the 16-bit DOS build: the run produced no
+       output at all, so it looked like it never started.  With no buffer,
+       the last line printed is the last check that ran. */
+    setvbuf(stdout, SK_NULL, _IONBF, 0);
+
     fails = sk_selftest_run();
     return (fails == 0) ? 0 : 1;
 }

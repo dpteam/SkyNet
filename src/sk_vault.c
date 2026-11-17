@@ -394,6 +394,11 @@ int sk_vault_selftest(void)
     FILE *f;
     int ok;
 
+    /* Step markers, flushed immediately.  This test is the one place where
+       a silent death is unacceptable: it is what the DOS build relies on to
+       prove the vault works without fsync, and a buffered stdout turned the
+       first DOS run into "no output at all".  With markers, the last line
+       printed names the step that killed the process. */
     ok = 1;
     sk_vault_wipe();
 
@@ -406,22 +411,33 @@ int sk_vault_selftest(void)
     a.rng[3] = 7;
     a.out_bytes = 1234;
 
+    printf("  vault 1: open\n");
+    fflush(stdout);
     if (!sk_vault_open(&v, SK_VAULT_TEST_DIR))
         return 0;
 
     /* 1. an empty vault reports "nothing to recover" */
+    printf("  vault 2: empty load\n");
+    fflush(stdout);
     if (sk_vault_load(&v, &got))
         ok = 0;
 
     /* 2. snapshot, then load it back */
+    printf("  vault 3: snapshot\n");
+    fflush(stdout);
     if (!sk_vault_snapshot(&v, &a))
         ok = 0;
+
+    printf("  vault 4: reload\n");
+    fflush(stdout);
     if (!sk_vault_load(&v, &got))
         ok = 0;
     else if (got.prime_index != 42 || got.prime_value != 181 || got.seq != 1)
         ok = 0;
 
     /* 3. a journal record newer than the snapshot wins */
+    printf("  vault 5: journal\n");
+    fflush(stdout);
     b = a;
     b.seq = 2;
     b.prime_index = 99;
@@ -434,6 +450,8 @@ int sk_vault_selftest(void)
         ok = 0;
 
     /* 4. second snapshot fills the other slot, so both slots exist */
+    printf("  vault 6: second slot\n");
+    fflush(stdout);
     if (!sk_vault_snapshot(&v, &b))
         ok = 0;
     if (!v.slot_valid[0] || !v.slot_valid[1])
@@ -441,6 +459,8 @@ int sk_vault_selftest(void)
 
     /* 5. damage the NEWER slot: recovery must fall back to the older one
           instead of returning a corrupt state */
+    printf("  vault 7: damage a slot\n");
+    fflush(stdout);
     sk_vault_bite(v.path[v.slot_seq[0] >= v.slot_seq[1] ? 0 : 1]);
     {
         sk_vault v2;
@@ -457,6 +477,8 @@ int sk_vault_selftest(void)
 
     /* 6. a torn journal tail is normal after a kill: ignore it, do not
           fail the whole recovery */
+    printf("  vault 8: torn journal\n");
+    fflush(stdout);
     {
         char path[SK_VAULT_PATHLEN];
         if (sk_io_join(path, SK_VAULT_PATHLEN, SK_VAULT_TEST_DIR, "WAL.LOG") == 0) {
@@ -470,6 +492,8 @@ int sk_vault_selftest(void)
     if (!sk_vault_load(&v, &got))
         ok = 0;
 
+    printf("  vault 9: close\n");
+    fflush(stdout);
     sk_vault_close(&v);
     return ok;
 }
