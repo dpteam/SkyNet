@@ -28,18 +28,43 @@ echo
 echo "== extract"
 rm -rf "$WORK/opt"
 mkdir -p "$WORK/opt"
-tar xf "$WORK/ow.tar.xz" -C "$WORK/opt"
+# Verify before extracting: a truncated archive fails inside tar with a
+# message that looks like a code problem, which wasted a debugging cycle.
+if ! xz -t "$WORK/ow.tar.xz" 2>/dev/null; then
+    echo "::error::archive at $WORK/ow.tar.xz is not intact"
+    exit 1
+fi
+tar xf "$WORK/ow.tar.xz" -C "$WORK/opt" || {
+    echo "::error::extraction failed"
+    exit 1
+}
 
 echo "== locate the LINUX host compiler"
 WATCOM="$WORK/opt"
-WCC="$WATCOM/binl64/wcc"
-[ -x "$WCC" ] || WCC="$WATCOM/binl/wcc"
-if [ ! -x "$WCC" ]; then
-    echo "FAIL: no Linux host compiler in the snapshot"
-    ls "$WATCOM" | head -20
+
+# The snapshot ships host binaries for many platforms (binl64 for Linux x64,
+# bino64 for OS/2, binnt for Windows).  Prefer the Linux ones, but fall back
+# to any wcc in the tree: the layout has changed between snapshots, and a
+# hard-coded path turns a cosmetic change upstream into a red job.
+WCC=""
+for cand in "$WATCOM/binl64/wcc" "$WATCOM/binl/wcc"; do
+    if [ -x "$cand" ]; then WCC="$cand"; break; fi
+done
+if [ -z "$WCC" ]; then
+    WCC=$(find "$WATCOM" -maxdepth 3 -type f -name wcc 2>/dev/null | head -1)
+fi
+if [ -z "$WCC" ] || [ ! -x "$WCC" ]; then
+    echo "::error::no host compiler found in the OpenWatcom snapshot"
+    echo "archive: $(wc -c < "$WORK/ow.tar.xz" 2>/dev/null || echo 0) bytes"
+    echo "top level of the extracted tree:"
+    ls "$WATCOM" 2>/dev/null | head -30
+    echo "any wcc in the tree:"
+    find "$WATCOM" -name 'wcc*' 2>/dev/null | head -10
     exit 1
 fi
+WATCOM=$(dirname "$(dirname "$WCC")")
 echo "wcc: $WCC"
+echo "WATCOM: $WATCOM"
 
 echo
 echo "== compile the core for 16-bit DOS, one file at a time"

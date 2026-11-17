@@ -263,23 +263,6 @@ jobs:
           ls -la build_dos/skynet.exe
           file build_dos/skynet.exe || true
 
-      - name: build 16-bit DOS binary
-        run: |
-          set -e
-          WCC=$(find "$HOME/watcom" -maxdepth 4 -name wcc -type f | head -1)
-          test -n "$WCC" || { echo "::error::wcc not found in the OpenWatcom snapshot"; exit 1; }
-          WATCOM=$(dirname "$(dirname "$WCC")")
-          export WATCOM
-          export PATH="$WATCOM/binl64:$WATCOM/binl:$PATH"
-          export INCLUDE="$WATCOM/h"
-          echo "WATCOM=$WATCOM"
-          mkdir -p build_dos
-          wcc -ml -zq -Isrc -fo=build_dos/ src/main.c src/sk_math.c \
-              src/sk_arena.c src/sk_clock.c src/sk_vault.c src/sk_sched.c \
-              src/sk_io.c src/sk_selftest.c
-          wlink system dos name build_dos/skynet.exe file build_dos/*.obj
-          ls -la build_dos/
-
       - name: upload DOS binary
         uses: actions/upload-artifact@v4
         with:
