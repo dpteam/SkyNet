@@ -116,6 +116,7 @@ SkyNet/
 |---|---|
 | [docs/00-index.md](docs/00-index.md) | навигация |
 | [docs/01-architecture.md](docs/01-architecture.md) | архитектура, инварианты, вехи |
+| [docs/02-ci.md](docs/02-ci.md) | что CI ловит и какие баги уже нашёл |
 | [docs/10-self-training.md](docs/10-self-training.md) | самообучение на ФС: 6 способов убить систему и 6 инвариантов |
 | [docs/11-babel.md](docs/11-babel.md) | Вавилонская библиотека: почему данных всегда хватает |
 | [docs/20-ideas.md](docs/20-ideas.md) | бэклог идей с привязкой к рискам |
@@ -145,6 +146,8 @@ SkyNet/
 | `crash-test` | 15 убийств, режим `--durable`, восстановление после порчи слота |
 | `hygiene` | инварианты I1/I2/C89 не нарушены, и сам чекер не пустой |
 | `dos-build` | 16-бит DOS через OpenWatcom (best effort) |
+
+Подробности и разбор найденных багов: [docs/02-ci.md](docs/02-ci.md).
 
 Артефакты после прогона: `skynet-linux-x86_64`, `skynet-linux-clang`,
 `skynet-linux-tcc`, `skynet-linux-i386`, `skynet-windows-x86_64`,
