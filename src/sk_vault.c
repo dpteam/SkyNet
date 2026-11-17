@@ -167,7 +167,6 @@ static int sk_vault_replay(sk_vault *v, sk_state *st)
     sk_state rec;
     FILE *f;
     int applied;
-    long pos;
 
     f = fopen(v->wal_path, "rb");
     if (f == SK_NULL)
@@ -175,7 +174,6 @@ static int sk_vault_replay(sk_vault *v, sk_state *st)
 
     applied = 0;
     for (;;) {
-        pos = ftell(f);
         if (!sk_read_exact(f, hdr, SK_WAL_HDR))
             break;
         if (sk_get32(hdr + 0) != SK_WAL_MAGIC)
@@ -191,7 +189,6 @@ static int sk_vault_replay(sk_vault *v, sk_state *st)
             *st = rec;
             applied++;
         }
-        (void)pos;
     }
     fclose(f);
     return applied;

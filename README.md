@@ -10,6 +10,8 @@
 
 `M0` — ядро готово, 34/34 инварианта, 2.29 млн простых без единого расхождения
 
+[![ci](https://github.com/dpteam/skynet/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+
 </div>
 
 ---
@@ -40,13 +42,14 @@ python tools/make_logo.py     # перегенерировать из прост
 
 ## Быстрый старт
 
-```bash
-# собрать (любой из компиляторов)
+```powershell
+# собрать и проверить всё одной командой
+.\build.ps1 -Compiler all -RunTests
+
+# или вручную
 gcc -std=c89 -pedantic -Wall -Wextra -O2 -o skynet.exe ^
     src\main.c src\sk_math.c src\sk_arena.c src\sk_clock.c ^
     src\sk_vault.c src\sk_sched.c src\sk_io.c src\sk_selftest.c
-
-tcc -o skynet.exe src\*.c      # тоже работает
 
 # проверить себя
 skynet selftest                # 34/34
@@ -57,8 +60,8 @@ skynet run --max 1000000
 # что будет восстановлено после сбоя
 skynet recover
 
-# прогнать краш-тест (убивает процесс 15 раз)
-powershell -File tests\crash_test.ps1
+# краш-тест: убивает процесс N раз и проверяет непрерывность
+powershell -File tests\crash_test.ps1 -Rounds 15
 ```
 
 ## Три решения, на которых всё держится
@@ -129,6 +132,28 @@ SkyNet/
 
 Последняя строка — причина, по которой durability-политика вынесена наружу
 явным флагом `--durable`, а не спрятана внутри библиотеки.
+
+## CI и артефакты
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) гоняет то, что нельзя
+проверить на одной машине:
+
+| Job | Что доказывает |
+|---|---|
+| `build` × 5 | собирается gcc, clang, tcc, mingw и clang/macOS с `-Werror` |
+| `build-32bit` | 32-битная сборка **запускается** и проходит selftest и краш-тест |
+| `crash-test` | 15 убийств, режим `--durable`, восстановление после порчи слота |
+| `hygiene` | инварианты I1/I2/C89 не нарушены, и сам чекер не пустой |
+| `dos-build` | 16-бит DOS через OpenWatcom (best effort) |
+
+Артефакты после прогона: `skynet-linux-x86_64`, `skynet-linux-clang`,
+`skynet-linux-tcc`, `skynet-linux-i386`, `skynet-windows-x86_64`,
+`skynet-macos`, `skynet-dos-16bit`.
+
+Отдельно про `build-32bit`: до CI утверждение «`long` ровно 32 бита»
+проверялось только **компиляцией**. Теперь оно проверяется **запуском** —
+это самое нагруженное допущение во всём коде, и оно заслуживает реального
+теста, а не надежды.
 
 ## Лицензия
 

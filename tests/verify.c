@@ -40,7 +40,6 @@ int main(int argc, char **argv)
         }
         want = (unsigned long)c.value;
         if (n != want) {
-            if (n == c.index ? 0 : 0) { /* unreachable, keeps types honest */ }
             if (line > 1 && n < want)
                 dups++;
             else

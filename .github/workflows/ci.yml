@@ -1,0 +1,235 @@
+name: ci
+
+# The point of this workflow is not a green badge.  It is the three things
+# that cannot be checked on one developer machine:
+#   1. does the core really build with compilers other than the author's;
+#   2. does the 32-bit build RUN and pass, not merely compile;
+#   3. does crash recovery hold on a different filesystem and scheduler.
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+
+  # ---------------------------------------------------------------- build
+  build:
+    name: build / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-gcc
+            os: ubuntu-latest
+            cc: gcc
+            artifact: skynet-linux-x86_64
+            binary: skynet
+          - name: linux-clang
+            os: ubuntu-latest
+            cc: clang
+            artifact: skynet-linux-clang
+            binary: skynet
+          - name: linux-tcc
+            os: ubuntu-latest
+            cc: tcc
+            artifact: skynet-linux-tcc
+            binary: skynet
+          - name: windows-mingw
+            os: windows-latest
+            cc: gcc
+            artifact: skynet-windows-x86_64
+            binary: skynet.exe
+          - name: macos-clang
+            os: macos-latest
+            cc: clang
+            artifact: skynet-macos
+            binary: skynet
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install tcc (linux only)
+        if: matrix.cc == 'tcc'
+        run: sudo apt-get update && sudo apt-get install -y tcc
+
+      # tcc accepts a reduced flag set; -std=c89 is not supported by it, so
+      # the portability check uses plain -Wall and relies on the sources
+      # being C89 rather than on the compiler enforcing it.
+      - name: build (tcc)
+        if: matrix.cc == 'tcc'
+        run: tcc -Wall -Isrc -o ${{ matrix.binary }} src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_selftest.c
+
+      - name: build (strict)
+        if: matrix.cc != 'tcc'
+        shell: bash
+        run: |
+          set -e
+          ${{ matrix.cc }} -std=c89 -pedantic -Wall -Wextra -Werror -O2 \
+            -Isrc -o ${{ matrix.binary }} \
+            src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c \
+            src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_selftest.c
+
+      - name: selftest
+        shell: bash
+        run: |
+          set -e
+          ./${{ matrix.binary }} selftest
+          echo "selftest passed on ${{ matrix.name }}"
+
+      - name: upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
+
+  # ------------------------------------------------------------ 32-bit
+  # This job exists because "long is exactly 32 bits" is the single most
+  # load-bearing assumption in the code, and until now it was only checked
+  # by compiling, never by running.
+  build-32bit:
+    name: build / linux-32bit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install multilib
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+
+      - name: build 32-bit
+        run: make 32 CFLAGS="-std=c89 -pedantic -Wall -Wextra -Werror -O2"
+
+      - name: selftest 32-bit
+        run: |
+          set -e
+          file build/skynet32
+          ./build/skynet32 selftest
+
+      - name: crash test 32-bit
+        run: |
+          set -e
+          cp build/skynet32 skynet
+          sh tests/crash_test.sh 6
+
+      - name: upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: skynet-linux-i386
+          path: build/skynet32
+          if-no-files-found: error
+
+  # ---------------------------------------------------------- crash test
+  crash-test:
+    name: crash recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build
+        run: make all CFLAGS="-std=c89 -pedantic -Wall -Wextra -Werror -O2"
+
+      - name: selftest
+        run: ./skynet selftest
+
+      - name: crash test (15 kills)
+        run: sh tests/crash_test.sh 15
+
+      - name: crash test (durable mode, survives power loss)
+        run: |
+          set -e
+          rm -rf build/dur && mkdir -p build/dur
+          ./skynet run --quiet --durable --max 5000 \
+            --dir build/dur/state --out build/dur/p.txt
+          ./build/verify build/dur/p.txt
+          echo "durable mode ok"
+
+      - name: recover after simulated corrupt slot
+        run: |
+          set -e
+          rm -rf build/rec && mkdir -p build/rec
+          ./skynet run --quiet --max 3000 --dir build/rec/state --out build/rec/p.txt
+          ./skynet run --quiet --max 6000 --dir build/rec/state --out build/rec/p.txt
+          # damage one slot the way a bad sector would
+          f=$(ls build/rec/state/STATE.* | head -1)
+          printf '\xde\xad\xbe\xef' | dd of="$f" bs=1 seek=30 conv=notrunc status=none
+          echo "damaged $f, expecting recovery from the other slot"
+          ./skynet recover --dir build/rec/state
+
+  # ------------------------------------------------------------- linting
+  hygiene:
+    name: hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The invariants in docs/01-architecture.md are only real if they are
+      # enforced.  This checker strips comments and string literals before
+      # looking for banned tokens, so it does not fire on the comments that
+      # explain why those tokens are banned.
+      - name: enforce core invariants
+        run: python3 tools/hygiene.py -v
+
+      - name: the checker is not a no-op
+        run: |
+          set -e
+          # A check that cannot fail protects nothing.  Prove it bites.
+          printf '/* t */\n#include <math.h>\nint f(void){ double x=1.0; // c\n return (int)rand()+(int)x; }\n' > src/sk_zz_probe.c
+          if python3 tools/hygiene.py; then
+            echo "::error::hygiene.py passed on a deliberately bad file"
+            rm -f src/sk_zz_probe.c
+            exit 1
+          fi
+          rm -f src/sk_zz_probe.c
+          python3 tools/hygiene.py
+          echo "checker catches float, rand, math.h and // comments"
+
+      - name: docs exist
+        run: |
+          set -e
+          for f in README.md LICENSE docs/00-index.md docs/01-architecture.md \
+                   docs/20-ideas.md PROMPT.md; do
+            test -f "$f" || { echo "::error::missing $f"; exit 1; }
+          done
+          echo "documentation present"
+
+      - name: logo regenerates identically
+        run: |
+          set -e
+          python3 tools/make_logo.py
+          git diff --exit-code assets/ || {
+            echo "::error::assets/ is out of date, run tools/make_logo.py"
+            exit 1
+          }
+          echo "logo is reproducible from the prime sequence"
+
+  # --------------------------------------------------------------- dos
+  # DOS is the real target, so it deserves a real 16-bit compiler.
+  # This job is best-effort: it needs a container image, and if that image
+  # is unavailable the workflow must not go red for it.  The authoritative
+  # DOS check is still a manual run on FreeDOS under hv86 / DOSBox.
+  dos-build:
+    name: build / dos-16bit (best effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: ghcr.io/open-watcom/open-watcom-v2:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build with OpenWatcom (16-bit DOS, large model)
+        run: |
+          set -e
+          mkdir -p build_dos
+          wcc -ml -zq -Isrc -fo=build_dos/ src/main.c src/sk_math.c \
+              src/sk_arena.c src/sk_clock.c src/sk_vault.c src/sk_sched.c \
+              src/sk_io.c src/sk_selftest.c
+          wlink system dos name build_dos/skynet.exe file build_dos/*.obj
+
+      - name: upload DOS binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: skynet-dos-16bit
+          path: build_dos/skynet.exe
+          if-no-files-found: warn
