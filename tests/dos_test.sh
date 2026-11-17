@@ -46,8 +46,11 @@ echo "=== DOS acceptance test ==="
 echo "[1] selftest"
 reset_work
 OUT=$(sh tools/dos_run.sh "$WORK" "skynet selftest" SELF.TXT || true)
-check "selftest reports 37 passed" "$(matches "$OUT" "37 passed, 0 failed")"
-check "selftest reached the end"   "$(matches "$OUT" "vault 9: close")"
+# Deliberately not a hardcoded count: it changes every time a check is
+# added, and a test that must be edited after each improvement is a test
+# that will eventually be edited to pass.
+check "selftest reports zero failures" "$(matches "$OUT" "passed, 0 failed")"
+check "selftest reached the end"       "$(matches "$OUT" "vault 9: close")"
 
 echo "[2] arena degradation (8 MB requested on a 640 KB machine)"
 OUT=$(sh tools/dos_run.sh "$WORK" "skynet run --quiet --max 100 --dir S --out P.TXT" RUN1.TXT || true)
@@ -74,6 +77,22 @@ if [ -f "$WORK/P.TXT" ]; then
 else
     check "primes file exists" 0
 fi
+
+echo "[6] EMS memory report"
+OUT=$(sh tools/dos_run.sh "$WORK" "skynet mem" MEM.TXT || true)
+check "EMS driver detected" "$(matches "$OUT" "ems   : v")"
+check "EMS reports free pages" "$(matches "$OUT" "pages")"
+check "the 64 KB ceiling is lifted" "$(matches "$OUT" "no longer applies")"
+echo "$OUT" | grep -E "ems|usable" | sed 's/^/        /'
+
+echo "[7] paged store round-trip across page boundaries"
+# The selftest writes 3 pages of a pattern derived from the offset, then
+# reads them back in 173-byte chunks so every page boundary is crossed at
+# two different alignments. A forgotten map() shows up as a byte mismatch.
+OUT=$(sh tools/dos_run.sh "$WORK" "skynet selftest" SELF2.TXT || true)
+check "pool opened in EMS"          "$(matches "$OUT" "pool: 48 KB in 3 EMS pages")"
+check "pool round-trip passed"      "$(matches "$OUT" "passed, 0 failed")"
+echo "$OUT" | grep -E "pool:|maps" | sed 's/^/        /'
 
 echo
 if [ "$fails" -eq 0 ]; then

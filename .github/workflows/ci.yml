@@ -1,4 +1,4 @@
-﻿name: ci
+name: ci
 
 # The point of this workflow is not a green badge.  It is the three things
 # that cannot be checked on one developer machine:
@@ -59,7 +59,7 @@ jobs:
       # being C89 rather than on the compiler enforcing it.
       - name: build (tcc)
         if: matrix.cc == 'tcc'
-        run: tcc -Wall -Isrc -o ${{ matrix.binary }} src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_selftest.c
+        run: tcc -Wall -Isrc -o ${{ matrix.binary }} src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_selftest.c
 
       - name: build (strict)
         if: matrix.cc != 'tcc'
@@ -69,7 +69,7 @@ jobs:
           ${{ matrix.cc }} -std=c89 -pedantic -Wall -Wextra -Werror -O2 \
             -Isrc -o ${{ matrix.binary }} \
             src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c \
-            src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_selftest.c
+            src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_selftest.c
 
       - name: selftest
         shell: bash
@@ -176,6 +176,26 @@ jobs:
       # explain why those tokens are banned.
       - name: enforce core invariants
         run: python3 tools/hygiene.py -v
+
+      - name: platform detection is written once
+        run: |
+          set -e
+          # The same bug shipped twice: platform macros were derived in two
+          # places and drifted, once making sk_io.c compile its POSIX branch
+          # on DOS, once making sk_mem.c report "not a DOS target". The rule
+          # that prevents a third time is mechanical, so it is checked.
+          bad=0
+          for f in src/*.c src/*.h; do
+            case "$f" in
+              src/sk_plat.h) continue ;;
+            esac
+            if grep -qE 'defined\((MSDOS|__DOS__|__WATCOMC__|__TURBOC__)\)' "$f"; then
+              echo "::error file=$f::derives the platform itself; include sk_plat.h instead"
+              bad=1
+            fi
+          done
+          test "$bad" = 0
+          echo "platform detection lives only in src/sk_plat.h"
 
       - name: the checker is not a no-op
         run: |

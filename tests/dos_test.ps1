@@ -33,8 +33,11 @@ Write-Host "=== DOS acceptance test ==="
 Write-Host "[1] selftest"
 $out = & powershell -ExecutionPolicy Bypass -File $run -Exe $Exe -Command "skynet selftest" -TimeoutSec $TimeoutSec -OutFile "SELF.TXT"
 $text = $out -join "`n"
-Check "selftest reports 37 passed" ($text -match "37 passed, 0 failed")
-Check "selftest reached the end"   ($text -match "vault 9: close")
+# Deliberately not a hardcoded count: it changes every time a check is
+# added, and a test that has to be edited after each improvement is a test
+# that will eventually be edited to pass.
+Check "selftest reports zero failures" ($text -match "\d+ passed, 0 failed")
+Check "selftest reached the end"       ($text -match "vault 9: close")
 
 # 2. arena degradation: 8 MB requested on a 640 KB machine
 Write-Host "[2] arena degradation"
@@ -67,6 +70,23 @@ if (Test-Path $primes) {
 } else {
     Check "primes file exists" $false
 }
+
+# 6. EMS: the number that lifts the 64 KB ceiling
+Write-Host "[6] EMS memory report"
+$out = & powershell -ExecutionPolicy Bypass -File $run -Preserve -Exe $Exe -Command "skynet mem" -TimeoutSec $TimeoutSec -OutFile "MEM.TXT"
+$text = $out -join "`n"
+Check "EMS driver detected"        ($text -match "ems   : v")
+Check "EMS reports free pages"     ($text -match "pages")
+Check "the 64 KB ceiling is lifted" ($text -match "no longer applies")
+($text -split "`n" | Where-Object { $_ -match "ems|usable" } | ForEach-Object { Write-Host "        $_" })
+
+# 7. paged store round-trip across page boundaries
+Write-Host "[7] paged store round-trip"
+$out = & powershell -ExecutionPolicy Bypass -File $run -Preserve -Exe $Exe -Command "skynet selftest" -TimeoutSec $TimeoutSec -OutFile "SELF2.TXT"
+$text = $out -join "`n"
+Check "pool opened in EMS"     ($text -match "pool: 48 KB in 3 EMS pages")
+Check "pool round-trip passed" ($text -match "passed, 0 failed")
+($text -split "`n" | Where-Object { $_ -match "pool:|maps" } | ForEach-Object { Write-Host "        $_" })
 
 Write-Host ""
 if ($fails -eq 0) {

@@ -2,54 +2,28 @@
  *
  * SKYNET M0 / subsystem: core/io
  */
-/* Feature test macros must come before ANY header, so this block is the
- * first thing in the file.
- *
- * Why it is needed: -std=c89 defines __STRICT_ANSI__, and under that glibc
- * hides the POSIX declarations of fileno(), fsync() and ftruncate().  The
- * code then compiles on Windows (which uses _commit/_chsize) and fails on
- * Linux with "implicit declaration", which is exactly what CI found.
- * Asking for POSIX.1-2008 explicitly is the correct fix, not a workaround.
- *
- * Windows and DOS are excluded: they do not have these functions at all,
- * and defining the macro there only confuses their headers. */
-#if !defined(_WIN32) && !defined(__WIN32__) && !defined(__NT__) \
-    && !defined(__TURBOC__) && !defined(__BORLANDC__) && !defined(MSDOS) \
-    && !defined(__DOS__) && !defined(__WATCOMC__)
-#  ifndef _POSIX_C_SOURCE
-#    define _POSIX_C_SOURCE 200809L
-#  endif
-#endif
+/* Feature test macros must come before ANY header, so this include is the
+ * first thing in the file.  The platform decision itself lives in
+ * sk_plat.h - it used to live here, duplicated, and that duplication
+ * produced a bug (see sk_plat.h for the story). */
+#include "sk_plat.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "sk_io.h"
 
-/* One definition of "is this DOS", used by both the feature-test block
- * above and the header block below.  Keeping two copies is how the first
- * version shipped a bug: the guard listed MSDOS, OpenWatcom defines
- * __WATCOMC__ and __DOS__ but NOT MSDOS, so sk_io.c silently compiled its
- * POSIX branch with a DOS one-argument mkdir() and failed with E1151. */
-#if defined(__TURBOC__) || defined(__BORLANDC__) || defined(MSDOS) \
-    || defined(__DOS__) || (defined(__WATCOMC__) && !defined(_WIN32))
-#  define SK_IS_DOS 1
-#endif
-
-#if defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
-#  define SK_PLAT_WIN 1
+#if defined(SK_PLAT_WIN)
 #  include <direct.h>
 #  include <io.h>
 #  include <windows.h>
-#elif defined(SK_IS_DOS)
-#  define SK_PLAT_DOS 1
+#elif defined(SK_PLAT_DOS)
 /* No <dir.h>: Turbo C 2.0 needs it for mkdir(), OpenWatcom does not ship it
    and declares mkdir() in <io.h> instead.  <io.h> exists on both, so that
    is the one include that is safe to use here. */
 #  include <io.h>
 #  include <sys/stat.h>
 #else
-#  define SK_PLAT_POSIX 1
 #  include <unistd.h>
 #  include <sys/stat.h>
 #  include <sys/types.h>

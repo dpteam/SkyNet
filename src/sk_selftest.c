@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "sk_selftest.h"
+#include "sk_mem.h"
 #include "sk_math.h"
 #include "sk_arena.h"
 #include "sk_clock.h"
@@ -16,6 +17,12 @@
 
 static int sk_fail;
 static int sk_pass;
+
+static void sk_emit_line(const char *line)
+{
+    printf("  %s\n", line);
+    fflush(stdout);
+}
 
 static void sk_check(const char *what, int ok)
 {
@@ -257,6 +264,16 @@ int sk_selftest_run(void)
     printf("arena...\n");
     fflush(stdout);
     sk_test_arena();
+
+    printf("memory...\n");
+    fflush(stdout);
+    {
+        sk_meminfo mi;
+        sk_mem_probe(&mi);
+        sk_mem_report(&mi, sk_emit_line);
+        sk_check("pool round-trip across page boundaries",
+                 sk_pool_selftest() == 1);
+    }
 
     printf("vault...\n");
     fflush(stdout);

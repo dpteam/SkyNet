@@ -24,6 +24,8 @@ output=surface
 [dosbox]
 machine=svga_s3
 memsize=16
+ems=true
+xms=true
 
 [cpu]
 core=auto

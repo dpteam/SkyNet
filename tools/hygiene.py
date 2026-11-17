@@ -27,6 +27,12 @@ SRC = os.path.join(ROOT, "src")
 # the one file allowed to allocate directly, and the one allowed to know
 # which operating system it is running on
 ARENA_FILE = "sk_arena.c"
+
+# Files allowed to include platform headers.  Both are platform layers by
+# design: sk_io is the file/OS boundary, sk_mem is the BIOS/memory
+# boundary (INT 67h for EMS).  Everything else must be portable C89, and
+# this list is the whole list.
+PLATFORM_FILES = {"sk_io.c", "sk_mem.c", "sk_plat.h"}
 IO_FILE = "sk_io.c"
 
 BANNED_KEYWORDS = {
@@ -160,10 +166,10 @@ def check_file(path, verbose):
     for inc in PLATFORM_INCLUDES:
         pat = r'#\s*include\s*[<"]%s[>"]' % re.escape(inc)
         for m in re.finditer(pat, code):
-            if name != IO_FILE:
+            if name not in PLATFORM_FILES:
                 problems.append((line_of(code, m.start()),
                                  "platform header <%s> belongs in %s only"
-                                 % (inc, IO_FILE)))
+                                 % (inc, " or ".join(sorted(PLATFORM_FILES)))))
 
     if verbose and not problems:
         print("  ok   %s" % name)

@@ -19,6 +19,7 @@
 #include "sk_clock.h"
 #include "sk_vault.h"
 #include "sk_io.h"
+#include "sk_mem.h"
 #include "sk_selftest.h"
 
 #define SK_VERSION "0.1.0-m0"
@@ -49,6 +50,7 @@ static void sk_usage(void)
     printf("  run        runtime: prime clock, checkpoint on every super-prime\n");
     printf("  train      ingest the listed files into a dataset manifest\n");
     printf("  recover    show the state the vault would resume from\n");
+    printf("  mem        report what memory this machine actually has\n");
     printf("  selftest   check every core invariant\n");
     printf("\n");
     printf("options\n");
@@ -103,6 +105,34 @@ static int cmd_selftest(void)
 
     fails = sk_selftest_run();
     return (fails == 0) ? 0 : 1;
+}
+
+static void sk_emit_stdout(const char *line)
+{
+    printf("%s\n", line);
+}
+
+static int cmd_mem(void)
+{
+    sk_meminfo mi;
+
+    setvbuf(stdout, SK_NULL, _IONBF, 0);
+
+    sk_mem_probe(&mi);
+    sk_mem_report(&mi, sk_emit_stdout);
+
+    /* The number the model layer needs, said plainly. */
+    printf("\n");
+    if (!mi.is_dos) {
+        printf("paged store: not needed on this host (flat arena)\n");
+    } else if (mi.ems_present && mi.ems_free_pages > 0) {
+        printf("paged store: %lu KB available through the EMS window\n",
+               (unsigned long)(mi.ems_free_pages * 16UL));
+        printf("the 64 KB linear ceiling no longer applies to weights\n");
+    } else {
+        printf("paged store: unavailable, arena stays at the 64 KB ceiling\n");
+    }
+    return 0;
 }
 
 static int cmd_recover(const sk_opts *o)
@@ -396,6 +426,7 @@ int main(int argc, char **argv)
         } else if (o.files == 0
                    && (strcmp(a, "run") == 0 || strcmp(a, "train") == 0
                        || strcmp(a, "recover") == 0
+                       || strcmp(a, "mem") == 0
                        || strcmp(a, "selftest") == 0)) {
             o.mode = a;
         } else if (o.files < 64) {
@@ -408,6 +439,8 @@ int main(int argc, char **argv)
 
     if (strcmp(o.mode, "selftest") == 0)
         return cmd_selftest();
+    if (strcmp(o.mode, "mem") == 0)
+        return cmd_mem();
     if (strcmp(o.mode, "recover") == 0)
         return cmd_recover(&o);
     if (strcmp(o.mode, "train") == 0) {

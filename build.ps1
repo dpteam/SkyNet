@@ -16,7 +16,7 @@ Push-Location $root
 
 $src = @(
     "src/main.c", "src/sk_math.c", "src/sk_arena.c", "src/sk_clock.c",
-    "src/sk_vault.c", "src/sk_sched.c", "src/sk_io.c", "src/sk_selftest.c"
+    "src/sk_vault.c", "src/sk_sched.c", "src/sk_io.c", "src/sk_mem.c", "src/sk_selftest.c"
 )
 
 New-Item -ItemType Directory -Force build | Out-Null
