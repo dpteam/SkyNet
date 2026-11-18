@@ -20,11 +20,24 @@ typedef struct {
     void     *priv;      /* private state, owned by sk_train.c */
 } sk_train;
 
-/* Bytes of storage a trainer for this model needs. */
-sk_u32 sk_train_bytes(const sk_model *m);
+/* Ask for the per-weight gradient buffers.
+ *
+ * Off by default because they are not free: dW for the last block's two
+ * feed-forward tables is HID*D*4 bytes each, about 196 KB together, and a
+ * 640 KB machine must not pay that to adjust row scales. With the flag the
+ * trainer also accumulates dL/dW for every element, which is what training
+ * the int8 codes needs.
+ *
+ * C89 note: a flags word rather than a boolean, because the next thing to
+ * want here is almost certainly the middle layers' gradients. */
+#define SK_TRAIN_CODES 1
 
-/* Open a trainer.  `storage` must be at least sk_train_bytes(m) long. */
-int  sk_train_open(sk_train *t, sk_model *m, void *storage, sk_u32 bytes);
+/* Bytes of storage a trainer for this model needs, given `flags`. */
+sk_u32 sk_train_bytes(const sk_model *m, int flags);
+
+/* Open a trainer.  `storage` must be at least sk_train_bytes(m, flags) long. */
+int  sk_train_open(sk_train *t, sk_model *m, void *storage, sk_u32 bytes,
+                   int flags);
 void sk_train_close(sk_train *t);
 
 /* Run one sequence and return the mean cross-entropy over the answer
@@ -49,6 +62,17 @@ void sk_train_zero_grads(sk_train *t);
 #define SK_P_G2  2     /* last block g2 gains, element     */
 #define SK_P_F1  3     /* last block f1 row scale, row     */
 #define SK_P_F2  4     /* last block f2 row scale, row     */
+#define SK_P_DW_F1 5   /* last block f1 weight, element    */
+#define SK_P_DW_F2 6   /* last block f2 weight, element    */
+
+/* Nothing can be added to a value that is not constant, so the function
+ * below returns the gradient of the effective weight, not of the code.
+ * dL/dcode = dL/dW_eff * scale; the scale is applied by the caller, which is
+ * the only place that knows which representation it is updating. */
+
+/* Mean dL/dW_eff for one element of a table, row-major, Q16.16.
+ * `index` = row * cols + col. Zero unless SK_TRAIN_CODES was asked for. */
+sk_fix sk_train_dw_get(sk_train *t, int kind, int index);
 
 /* Mean gradient for one parameter, raw Q16.16. */
 sk_fix sk_train_grad_get(sk_train *t, int kind, int index);

@@ -49,6 +49,7 @@ typedef struct {
     sk_i32 trust;
     int    quiet;
     int    durable;
+    int    probe;
     int    seed_given;
     sk_u32 seed[4];
     int    files;
@@ -79,6 +80,7 @@ static void sk_usage(void)
     printf("  --log N        journal every N primes   (default 1024)\n");
     printf("  --mem BYTES    arena size               (default 8388608)\n");
     printf("  --durable      fsync snapshots (survives power loss, ~85ms each)\n");
+    printf("  --probe        with predict: report every intermediate vector\n");
     printf("  --seed A,B,C,D rng seed (four hex or decimal words)\n");
     printf("  --quiet        do not echo primes to stdout\n");
     printf("  --help         this text\n");
@@ -136,6 +138,62 @@ static void sk_emit_stdout(const char *line)
  * the original float implementation. Comparing against my own rewrite would
  * only prove that I made the same mistake twice; comparing against the
  * released code proves the fixed-point port is faithful. */
+/* One Q16.16 value as text, without floating point: the core has none and a
+ * diagnostic that pulled in libm would not run on the target. */
+static void sk_pr_fix(sk_fix v)
+{
+    long av = (v < 0) ? -(long)v : (long)v;
+
+    printf("%s%ld.%04ld", (v < 0) ? "-" : "", av >> 16,
+           (((av & 0xFFFFL) * 10000L) >> 16));
+}
+
+/* Probe printer: one line per vector, named by layer and by what it is.
+ *
+ * Deliberately flat text with fixed field names rather than a nested format:
+ * the questions asked of it are "which layer first goes wrong" and "did this
+ * change when I edited that", and both are answered by grep and diff against
+ * a saved run. A parser would be a second thing to debug.
+ *
+ * The statistics are the ones that actually localise a fault: the mean
+ * magnitude says whether the stream is decaying or blowing up, argmax says
+ * which channel dominates, and it is read as a whole. */
+static void sk_probe_print(void *ctx, int layer, const char *what,
+                           const sk_fix *v, int n)
+{
+    sk_fix mn, mx, mabs = 0, sat = 0;
+    int i, arg = 0;
+
+    (void)ctx;
+    if (n <= 0)
+        return;
+    mn = v[0];
+    mx = v[0];
+    for (i = 0; i < n; i++) {
+        sk_fix a = (v[i] < 0) ? -v[i] : v[i];
+
+        if (v[i] < mn)
+            mn = v[i];
+        if (v[i] > mx) {
+            mx = v[i];
+            arg = i;
+        }
+        mabs += a / n;
+        if (a >= SK_FIX_MAX)
+            sat++;
+    }
+    printf("  L%-2d %-15s n %-3d mean|x| ", layer, what, n);
+    sk_pr_fix(mabs);
+    printf("  min ");
+    sk_pr_fix(mn);
+    printf("  max ");
+    sk_pr_fix(mx);
+    printf("  at %d", arg);
+    if (sat > 0)
+        printf("  SATURATED %d", (int)sat);
+    printf("\n");
+}
+
 static int cmd_predict(const sk_opts *o)
 {
     sk_model m;
@@ -258,6 +316,13 @@ static int cmd_predict(const sk_opts *o)
         return 3;
     }
 
+    /* Ask the forward pass to report every intermediate, when asked to.
+       Null during normal inference, so nothing below changes. */
+    if (o->probe) {
+        ctx.probe_ctx = SK_NULL;
+        ctx.probe = sk_probe_print;
+    }
+
     /* Feed the prompt, one letter at a time, exactly like the original. */
     n = (int)strlen(prompt);
     if (n <= 0 || n >= SK_T_CTX) {
@@ -272,6 +337,9 @@ static int cmd_predict(const sk_opts *o)
             tok = 2;
         if (tok >= SK_T_VOCAB)
             tok = SK_T_VOCAB - 1;
+        if (o->probe)
+            printf("pos %d tok %d '%c'\n", p, tok,
+                   (tok >= 2 && tok + 28 < 127) ? (char)(tok + 28) : '?');
         if (!sk_forward_step(&ctx, tok, bt_scores)) {
             printf("[sky] forward pass failed at position %d\n", p);
             sk_ctx_close(&ctx);
@@ -481,9 +549,12 @@ static int cmd_train(const sk_opts *o)
         return 6;
     }
 
-    tneed = sk_train_bytes(&m);
+    /* No per-weight buffers: this path trains row scales only, and the
+       196 KB they cost is not something a 640 KB machine should give
+       away for nothing. */
+    tneed = sk_train_bytes(&m, 0);
     tstore = sk_arena_alloc(&arena, tneed);
-    if (tstore == SK_NULL || !sk_train_open(&tr, &m, tstore, tneed)) {
+    if (tstore == SK_NULL || !sk_train_open(&tr, &m, tstore, tneed, 0)) {
         printf("[sky] cannot open the trainer (%lu bytes)\n",
                (unsigned long)tneed);
         sk_arena_done(&arena);
@@ -1099,6 +1170,7 @@ int main(int argc, char **argv)
     o.bits = 8;
     o.epochs = 1;
     o.lr = 16777;   /* 0.001 in Q8.24; measured best of 1e-5 .. 0.25 */
+    o.probe = 0;
     o.trust = 167772;  /* 0.01 in Q8.24: at most 1% of the scale per step */
     o.arena_bytes = 8UL * 1024UL * 1024UL;
 
@@ -1134,6 +1206,8 @@ int main(int argc, char **argv)
             o.layers = (int)strtol(argv[++i], SK_NULL, 10);
         } else if (strcmp(a, "--creativity") == 0 && i + 1 < argc) {
             o.creativity = (int)strtol(argv[++i], SK_NULL, 10);
+        } else if (strcmp(a, "--probe") == 0) {
+            o.probe = 1;
         } else if (strcmp(a, "--durable") == 0) {
             o.durable = 1;
         } else if (strcmp(a, "--seed") == 0 && i + 1 < argc) {

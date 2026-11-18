@@ -12,6 +12,7 @@ confirms the FORMULAS - medians of ours/theirs should sit at 1.0 - while the
 checker confirms the fixed-point arithmetic.
 
   python tools/ref_gradients.py tiny2.pt build/dataset.txt 20 > ref.txt
+  python tools/ref_gradients.py tiny2.pt build/dataset.txt 20 --quantized
 
 Needs torch, which the core does not: this is a development tool, not part of
 the program.
@@ -22,7 +23,7 @@ REFDIR = os.path.join('refs', 'Tiny-2.1-main', 'training')
 sys.path.insert(0, REFDIR)
 
 import torch
-from train2 import load_model, VOCAB
+from train2 import load_model, quantized_copy, VOCAB
 
 KINDS = {
     'GF': 'nf.g',
@@ -76,9 +77,18 @@ def main():
     dpath = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
         'build', 'dataset.txt')
     nlines = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+    # --quantized rounds the weights exactly as export() does, so both sides
+    # compute from the same numbers and any remaining difference is the
+    # arithmetic (Q16.16 vs float), not different weights. Comparing against
+    # the unquantised .pt would mix two effects and hide a real error.
+    quantized = '--quantized' in sys.argv
 
     torch.set_grad_enabled(True)
     m = load_model(mpath)
+    if quantized:
+        m = quantized_copy(m)
+        for prm in m.parameters():
+            prm.requires_grad_(True)
 
     samples = []
     with io.open(dpath, 'r', encoding='utf-8') as f:
@@ -115,6 +125,18 @@ def main():
         'F2': (last.f2.weight.detach(), last.f2.weight.grad),
         'OUT': (m.emb.weight.detach(), m.emb.weight.grad),
     }
+    # The per-weight gradients: dL/dW_eff, element by element, row-major.
+    # This is the quantity our dw_f1/dw_f2 accumulate, and writing it flat
+    # means the comparison does not have to agree on any structure.
+    for key, tensor in (('DW_F1', last.f1.weight.grad),
+                        ('DW_F2', last.f2.weight.grad)):
+        if tensor is None:
+            print('%s 0' % key)
+            continue
+        flat = tensor.reshape(-1).tolist()
+        print('%s %d' % (key, len(flat)))
+        print(' '.join('%.12g' % v for v in flat))
+
     for key in ('GF', 'G2', 'F1', 'F2', 'OUT'):
         w, g = named[key]
         if g is None:

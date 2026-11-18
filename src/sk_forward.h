@@ -63,7 +63,36 @@ typedef struct {
     sk_fix    tr_xf[SK_T_MAXD];  /* residual before the final norm     */
     sk_fix    tr_invf;     /* final norm factor                       */
     int       tr_layer;    /* which layer to record, -1 = none        */
+
+    /* Optional diagnostic: report the magnitude of every intermediate of the
+       step just computed. `probe` is a caller-supplied function so the core
+       keeps no file or terminal dependency, which is the same reason sk_io
+       owns all the platform code.
+     *
+     * Added after a debugging session that reached for printf six times in
+     * one afternoon. Recompiling to print a number is how a five-minute
+     * question becomes a forty-minute one, and on DOS it also costs a
+     * rebuild under a different compiler. */
+    void     *probe_ctx;
+    void    (*probe)(void *ctx, int layer, const char *what,
+                     const sk_fix *v, int n);
 } sk_ctx;
+
+/* What the probe is told about. Letters, not numbers, because the log is
+   read by a person. */
+#define SK_PROBE_EMB   "emb+pos"
+#define SK_PROBE_N1    "norm1"
+#define SK_PROBE_Q     "q"
+#define SK_PROBE_K     "k(raw)"
+#define SK_PROBE_V     "v(raw)"
+#define SK_PROBE_ATTN  "attn"
+#define SK_PROBE_N2    "norm2"
+#define SK_PROBE_MID   "relu"
+#define SK_PROBE_FFN   "ffn"
+#define SK_PROBE_RES   "residual"
+#define SK_PROBE_XF    "pre-norm-final"
+#define SK_PROBE_HF    "hidden"
+#define SK_PROBE_LOGIT "logits"
 
 /* Open the context.  `kv_storage` backs the cache when EMS is not used. */
 int  sk_ctx_open(sk_ctx *c, sk_model *m, void *kv_storage, sk_u32 kv_size);

@@ -106,6 +106,19 @@ void sk_ctx_reset(sk_ctx *c)
  * The epsilon is 1e-5 in the original; here it is one LSB of Q16.16
  * (1.5e-5), the closest representable value, doing the same job: keeping a
  * zero-variance vector from dividing by zero. */
+/* Report one vector to the caller's probe, or do nothing.
+ *
+ * A null check per call, five per layer, is cheaper than building the strings
+ * conditionally, and it is what makes the probe free when nobody is
+ * listening - which is the only way a diagnostic in the hot path is
+ * acceptable on a 486. */
+static void sk_tap(sk_ctx *c, int layer, const char *what,
+                   const sk_fix *v, int n)
+{
+    if (c->probe != SK_NULL)
+        c->probe(c->probe_ctx, layer, what, v, n);
+}
+
 static void sk_norm(const sk_fix *x, const sk_fix *g, sk_fix *y, int n,
                     sk_fix *inv_out)
 {
@@ -273,7 +286,7 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
         return 0;
     for (i = 0; i < m->D; i++)
         bx[i] += bt[i];
-
+    sk_tap(c, -1, SK_PROBE_EMB, bx, m->D);
 
     for (l = 0; l < m->L; l++) {
         sk_fix g1[SK_T_MAXD];
@@ -291,6 +304,7 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
 
         /* ---- attention -------------------------------------------- */
         sk_norm(bx, g1, bh, m->D, SK_NULL);
+        sk_tap(c, l, SK_PROBE_N1, bh, m->D);
 
 
         if (!sk_table_matvec(&m->wk[l], bh, bt))
@@ -309,6 +323,7 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
 
         if (!sk_table_matvec(&m->wq[l], bh, bq))
             return 0;
+        sk_tap(c, l, SK_PROBE_Q, bq, m->D);
 
         for (h = 0; h < m->H; h++) {
             sk_fix big, sum, s;
@@ -406,6 +421,7 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
                 memcpy(c->tr_xff, bx, (size_t)m->D * sizeof(sk_fix));
 
             sk_norm(bx, g2, bh, m->D, trace ? &c->tr_inv2 : SK_NULL);
+        sk_tap(c, l, SK_PROBE_N2, bh, m->D);
 
             if (trace && c->tr_hn2 != SK_NULL)
                 memcpy(c->tr_hn2, bh, (size_t)m->D * sizeof(sk_fix));
@@ -419,12 +435,15 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
             }
             if (trace && c->tr_mid != SK_NULL)
                 memcpy(c->tr_mid, bm, (size_t)m->HID * sizeof(sk_fix));
+            sk_tap(c, l, SK_PROBE_MID, bm, m->HID);
 
             if (!sk_table_matvec_dot(&m->f2[l], bm, bt,
                                      trace ? c->tr_dotf2 : SK_NULL))
                 return 0;
             for (i = 0; i < m->D; i++)
                 bx[i] += bt[i];
+            sk_tap(c, l, SK_PROBE_FFN, bt, m->D);
+            sk_tap(c, l, SK_PROBE_RES, bx, m->D);
         }
     }
 
@@ -437,10 +456,13 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
         /* Two small buffers, always kept: the trainer needs the residual
            entering the final norm and the norm factor to backprop through. */
         memcpy(c->tr_xf, bx, (size_t)m->D * sizeof(sk_fix));
+        sk_tap(c, m->L, SK_PROBE_XF, bx, m->D);
         sk_norm(bx, gf, bh, m->D, &c->tr_invf);
         memcpy(c->hf, bh, (size_t)m->D * sizeof(sk_fix));
+        sk_tap(c, m->L, SK_PROBE_HF, bh, m->D);
         if (!sk_table_matvec(&m->out, bh, scores))
             return 0;
+        sk_tap(c, m->L, SK_PROBE_LOGIT, scores, SK_T_VOCAB);
     }
 
     c->pos++;

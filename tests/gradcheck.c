@@ -203,9 +203,10 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    tneed = sk_train_bytes(&m);
+    tneed = sk_train_bytes(&m, SK_TRAIN_CODES);
     tstore = sk_arena_alloc(&arena, tneed);
-    if (!tstore || !sk_train_open(&tr, &m, tstore, tneed)) {
+    if (!tstore || !sk_train_open(&tr, &m, tstore, tneed,
+                             SK_TRAIN_CODES)) {
         printf("trainer open failed\n");
         return 2;
     }
@@ -262,6 +263,27 @@ int main(int argc, char **argv)
             ana[r] = (double)sk_train_grad_get(&tr, kinds[k].kind, r) / 65536.0;
             if (!sk_train_param_get(&tr, kinds[k].kind, r, &s0[r]))
                 s0[r] = 0;
+        }
+
+        if (dump && kinds[k].kind == SK_P_F1) {
+            int dr, dc;
+
+            printf("ANALYTIC DW_F1\n");
+            for (dr = 0; dr < m.HID; dr++)
+                for (dc = 0; dc < m.D; dc++)
+                    printf("%.12g\n", (double)sk_train_dw_get(&tr, SK_P_DW_F1,
+                                                               dr * m.D + dc)
+                           / 65536.0);
+        }
+        if (dump && kinds[k].kind == SK_P_F2) {
+            int dr, dc;
+
+            printf("ANALYTIC DW_F2\n");
+            for (dr = 0; dr < m.D; dr++)
+                for (dc = 0; dc < m.HID; dc++)
+                    printf("%.12g\n", (double)sk_train_dw_get(&tr, SK_P_DW_F2,
+                                                               dr * m.HID + dc)
+                           / 65536.0);
         }
 
         if (dump) {

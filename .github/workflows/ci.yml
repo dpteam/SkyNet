@@ -316,6 +316,38 @@ jobs:
              src/sk_forward.c src/sk_grad.c src/sk_train.c -lm
           ./build/gradcheck tests/fixtures/TINY.BIN build/dataset.txt
 
+      - name: the per-weight gradient is structurally sound
+        run: |
+          set -e
+          # dL/dW for a single element is about 4e-4, and one code step moves
+          # the weight by `scale` ~ 0.01, so the loss moves by 4e-6 - a
+          # quarter of one LSB of Q16.16. No step size makes that visible
+          # through a Q16.16 loss, so this cannot be a finite difference.
+          #
+          # Instead it checks a property that must hold by algebra: with one
+          # answer position, dW[i][j] = dmid[i] * hn2[j], and an outer product
+          # is rank one, which is testable by cross-multiplication without a
+          # reference and without floating point. A transposed matrix, a wrong
+          # input vector, or dmid taken before the ReLU mask all fail it.
+          cc -O2 -Isrc -o build/dwcheck tests/dwcheck.c \
+             src/sk_math.c src/sk_arena.c src/sk_clock.c src/sk_vault.c \
+             src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_tensor.c \
+             src/sk_forward.c src/sk_grad.c src/sk_train.c -lm
+          ./build/dwcheck tests/fixtures/TINY.BIN tests/fixtures/dataset.txt
+
+      - name: the generated corpus is correct
+        run: |
+          set -e
+          # Every answer in the corpus is computed, so a wrong line is a bug
+          # rather than a bad source. That claim is only worth something if
+          # the checker is not the generator: verify_corpus.py works the
+          # answers out a second time from the question text, with a sieve
+          # where the generator used trial division. This found one real bug
+          # - "which is bigger 522 or 761" answered "no" because the yes/no
+          # branch was chosen by testing whether the template contained "is ".
+          python3 tools/gen_corpus.py build/corpus.txt 20000
+          python3 tools/verify_corpus.py build/corpus.txt
+
       - name: the model matches the released implementation
         run: |
           set -e

@@ -31,6 +31,50 @@
 #include "sk_forward.h"
 #include "sk_arena.h"
 
+/* ---------------------------------------------------------------------
+ * Gradient gain: every gradient in this file carries a factor of
+ * SK_GRAD_GAIN, removed again in the accessors.
+ *
+ * Why, measured rather than assumed. On "how many senses do people have" the
+ * model answers with probability 0.9988, so dlogits[target] is
+ *
+ *     (0.9988 - 1.0) = -0.0012,  which is -80 in Q16.16.
+ *
+ * The next step is dyr = dy * scale, with the row scale near 0.005:
+ *
+ *     0.0012 * 0.005 = 6e-6,  which is 0.4 in Q16.16 - it truncates to ZERO.
+ *
+ * So the entire activation gradient below a confident prediction is exactly
+ * zero while the true gradient is merely small. Measured consequence: dwcheck
+ * failed with "every weight gradient is zero" on a single confident position,
+ * and on longer sequences most of dW came out zero.
+ *
+ * Multiplying dlogits by 64 buys six bits for everything below it: 0.4
+ * becomes 25, and 25 is a number. The gain is divided out in the accessors,
+ * so every caller sees the gradient it expects.
+ *
+ * Why 64 and not 256: dyr saturates at SK_FIX_MAX. dy is at most 65536 (a
+ * target probability of zero) times the gain, times a scale near 0.005. At 64
+ * that is 21 000, inside the 32 768 ceiling; at 256 it would reach 84 000 and
+ * clamp, turning a small gradient into a large wrong one.
+ *
+ * Which accumulators carry it, because they are not all the same:
+ *
+ *   g_emb, g_f1, g_f2   dscale = dy*dot          RAW. dot is large, the
+ *                                                product already fills the
+ *                                                accumulator, and 64x on top
+ *                                                saturates it.
+ *   g_gf, g_g2          the norm gain gradient   GAINED, they come out of
+ *   dw_f1, dw_f2        and dW = dy*x             the gained activation path.
+ *
+ * The split is a consequence of where the bits are lost, not a preference:
+ * the activation path multiplies by a row scale near 0.005 and that is what
+ * underflows. Every accessor divides by the gain for the kinds that carry
+ * it, and sk_train_dw_get does the same, so no caller sees it.
+ * ------------------------------------------------------------------- */
+#define SK_GRAD_SHIFT 6
+#define SK_GRAD_GAIN  ((sk_i32)1 << SK_GRAD_SHIFT)
+
 typedef struct {
     sk_fix *hf;       /* final normed activations        T x D   */
     sk_fix *logits;   /* raw scores                      T x V   */
@@ -55,6 +99,14 @@ typedef struct {
     sk_i32  *avg_f2;              /* last block f2 rows                  D */
     sk_i32  *avg_gf;              /* final norm gains                    D */
     sk_i32  *avg_g2;              /* last block norm gains               D */
+
+    /* Per-weight gradients for the last block's feed-forward tables.
+     * Row-major dL/dW_eff in Q16.16: the SAME quantity PyTorch calls
+     * weight.grad, so it can be compared with the reference trainer
+     * directly instead of through a scaled proxy. NULL unless
+     * SK_TRAIN_CODES was requested. */
+    sk_i32  *dw_f1;               /* HID x D */
+    sk_i32  *dw_f2;               /* D x HID */
 } sk_priv;
 
 static sk_priv *sk_p(sk_train *t)
@@ -85,7 +137,7 @@ static void sk_tr_softmax(sk_fix *v, int n)
         v[i] = sk_fix_div(v[i], sum);
 }
 
-sk_u32 sk_train_bytes(const sk_model *m)
+sk_u32 sk_train_bytes(const sk_model *m, int flags)
 {
     sk_u32 T = (sk_u32)SK_TRAIN_MAXT;
     sk_u32 D, V, HID, F;
@@ -116,6 +168,14 @@ sk_u32 sk_train_bytes(const sk_model *m)
     /* sk_i32 buffers */
     total += F * 4UL;
     total += (T * V) * 4UL;  /* dlogits */
+    if (flags & SK_TRAIN_CODES) {
+        /* Both feed-forward tables of the last block. Counted here rather
+           than in sk_train_open so the caller's allocation and the
+           trainer's appetite cannot disagree - that mismatch is how the
+           trace buffers once ran the arena dry and made every gradient read
+           as zero. */
+        total += (HID * D + D * HID) * 4UL;
+    }
     total += (V + D * 3UL + HID + D) * 4UL;  /* gradient accumulators */
     total += (HID + D * 4UL) * 4UL;          /* running |grad| per row */
     total += sk_ctx_kv_bytes(m);
@@ -123,7 +183,8 @@ sk_u32 sk_train_bytes(const sk_model *m)
     return total + 131072UL;
 }
 
-int sk_train_open(sk_train *t, sk_model *m, void *storage, sk_u32 bytes)
+int sk_train_open(sk_train *t, sk_model *m, void *storage, sk_u32 bytes,
+                  int flags)
 {
     sk_priv *p;
     sk_u32 T, D, V, HID;
@@ -159,6 +220,18 @@ int sk_train_open(sk_train *t, sk_model *m, void *storage, sk_u32 bytes)
     p->avg_f2 = (sk_i32 *)sk_arena_alloc(&p->arena, D * 4UL);
     p->avg_gf = (sk_i32 *)sk_arena_alloc(&p->arena, D * 4UL);
     p->avg_g2 = (sk_i32 *)sk_arena_alloc(&p->arena, D * 4UL);
+    if (flags & SK_TRAIN_CODES) {
+        p->dw_f1 = (sk_i32 *)sk_arena_alloc(&p->arena, HID * D * 4UL);
+        p->dw_f2 = (sk_i32 *)sk_arena_alloc(&p->arena, D * HID * 4UL);
+        if (p->dw_f1 == SK_NULL || p->dw_f2 == SK_NULL) {
+            printf("[train] no room for the per-weight gradients "
+                   "(%lu bytes asked for)\n", (unsigned long)bytes);
+            return 0;
+        }
+        memset(p->dw_f1, 0, (size_t)HID * D * sizeof(sk_i32));
+        memset(p->dw_f2, 0, (size_t)D * HID * sizeof(sk_i32));
+    }
+
     p->t_hn2 = (sk_fix *)sk_arena_alloc(&p->arena, T * D * 4UL);
     p->t_mid = (sk_fix *)sk_arena_alloc(&p->arena, T * HID * 4UL);
     p->t_dotf1 = (sk_fix *)sk_arena_alloc(&p->arena, T * HID * 4UL);
@@ -228,6 +301,12 @@ void sk_train_zero_grads(sk_train *t)
     memset(p->g_g2, 0, (size_t)t->m->D * sizeof(sk_i32));
     memset(p->g_f1, 0, (size_t)t->m->HID * sizeof(sk_i32));
     memset(p->g_f2, 0, (size_t)t->m->D * sizeof(sk_i32));
+    if (p->dw_f1 != SK_NULL)
+        memset(p->dw_f1, 0,
+               (size_t)t->m->HID * (size_t)t->m->D * sizeof(sk_i32));
+    if (p->dw_f2 != SK_NULL)
+        memset(p->dw_f2, 0,
+               (size_t)t->m->D * (size_t)t->m->HID * sizeof(sk_i32));
     p->grad_count = 0;
 
     /* NOT the running averages: they are optimiser state and have to
@@ -374,7 +453,11 @@ sk_fix sk_train_sequence(sk_train *t, const int *tokens, int ntok,
              * gradient it feeds is a product with dot, which is large
              * enough that 15 bits of fraction is plenty. One convention for
              * the whole file beats precision that is not needed. */
-            p->dlogits[tt * SK_T_VOCAB + i] = d;
+            /* The gain goes on here, at the only place a gradient is
+               created. Everything downstream inherits it and the accessors
+               remove it, so there is one knob and it cannot get out of
+               step. */
+            p->dlogits[tt * SK_T_VOCAB + i] = d * SK_GRAD_GAIN;
         }
         n++;
     }
@@ -402,9 +485,25 @@ sk_fix sk_train_sequence(sk_train *t, const int *tokens, int ntok,
  * converting to Q8.24 for the multiply by the learning rate.
  * ------------------------------------------------------------------- */
 
-/* dx += W^T * dy with the row scale folded in; dscale[i] += dy[i]*dot[i]. */
+/* dx += W^T * dy with the row scale folded in; dscale[i] += dy[i]*dot[i];
+ * dW[i][j] += dy[i]*x[j].
+ *
+ * The dW term is the whole of training the weights, and it costs one
+ * multiply per element: dL/dW_eff[i][j] is the row's incoming gradient times
+ * the input it was multiplied by. Nothing new has to be derived, which is
+ * why adding it here is a handful of lines rather than another pass over the
+ * network.
+ *
+ * Note what it is NOT: dL/dcode. The stored value is an integer code and
+ * W_eff = scale * code, so dL/dcode = scale * dL/dW_eff. The caller applies
+ * the scale, because only it knows whether it is updating the code or the
+ * scale.
+ *
+ * `x` is the vector this table was applied to (the input), and `dw` is
+ * row-major rows x cols. Either may be NULL, and then dW is skipped. */
 static int sk_tr_back(const sk_table *tab, const sk_i32 *dy, sk_i32 *dx,
-                      sk_i32 *dscale, const sk_fix *dot)
+                      sk_i32 *dscale, const sk_fix *dot,
+                      sk_i32 *dw, const sk_fix *x)
 {
     signed char w[SK_T_MAXHID];
     sk_u32 i, j;
@@ -415,8 +514,26 @@ static int sk_tr_back(const sk_table *tab, const sk_i32 *dy, sk_i32 *dx,
 
         if (!sk_table_scale_read(tab, i, &scale))
             return 0;
+        /* dscale is stored WITHOUT the gain, and the division is exact:
+           the gain is a power of two, so dy/GAIN is the original integer.
+           This is not a detail. Keeping the gain here saturated the
+           accumulator - dy reaches 65536, dot reaches 5.7e7 for the output
+           projection, and their product already sits at 868 in Q16.16;
+           times 64 it exceeds the 32768 ceiling and two rows of the
+           numerical check went from agreeing to 364% off. */
         if (dscale != SK_NULL && dot != SK_NULL)
-            dscale[i] += sk_fix_mul(dy[i], dot[i]);
+            dscale[i] += sk_fix_mul(dy[i] / SK_GRAD_GAIN, dot[i]);
+
+        /* Before the early exit below: a row whose dy rounds to zero in the
+           activation path still contributes to dW when dy itself is not
+           zero, and skipping it would quietly bias the weight gradient. */
+        if (dw != SK_NULL && x != SK_NULL && dy[i] != 0) {
+            sk_i32 *row = dw + (size_t)i * (size_t)tab->cols;
+
+            for (j = 0; j < tab->cols; j++)
+                if (x[j] != 0)
+                    row[j] += sk_fix_mul(dy[i], x[j]);
+        }
 
         dyr = sk_scale_fix(dy[i], scale);
         if (dyr == 0)
@@ -495,8 +612,14 @@ sk_fix sk_train_grads(sk_train *t, const int *tokens, int ntok,
 
         /* ---- output projection: dL/dhf ---------------------------- */
         memset(dhf, 0, (size_t)m->D * sizeof(sk_i32));
+        /* No dW here: the projection's per-weight gradient is
+           dlogits[r] * hf[j], which is the same formula, but the scales of
+           this table are already trained and its weights are the input
+           embedding - one tensor, two jobs. Left alone until weight tying is
+           revisited. */
         if (!sk_tr_back(&m->out, p->dlogits + tt * SK_T_VOCAB, dhf,
-                        p->g_emb, p->t_dotout + tt * SK_T_VOCAB))
+                        p->g_emb, p->t_dotout + tt * SK_T_VOCAB,
+                        SK_NULL, SK_NULL))
             return 0;
 
         /* ---- final norm: dL/dx after the last block ---------------- */
@@ -509,7 +632,8 @@ sk_fix sk_train_grads(sk_train *t, const int *tokens, int ntok,
            f1 is (HID x D): dL/dhn2 = f1^T * dmid, masked by the relu. */
         memset(dmid, 0, (size_t)m->HID * sizeof(sk_i32));
         if (!sk_tr_back(&m->f2[last], dxff, dmid, p->g_f2,
-                        p->t_dotf2 + tt * m->D))
+                        p->t_dotf2 + tt * m->D,
+                        p->dw_f2, p->t_mid + tt * m->HID))
             return 0;
         for (i = 0; i < m->HID; i++) {
             if (p->t_mid[tt * m->HID + i] <= 0)
@@ -518,7 +642,8 @@ sk_fix sk_train_grads(sk_train *t, const int *tokens, int ntok,
 
         memset(dhn2, 0, (size_t)m->D * sizeof(sk_i32));
         if (!sk_tr_back(&m->f1[last], dmid, dhn2, p->g_f1,
-                        p->t_dotf1 + tt * m->HID))
+                        p->t_dotf1 + tt * m->HID,
+                        p->dw_f1, p->t_hn2 + tt * m->D))
             return 0;
 
         /* ---- through the norm into the residual -------------------
@@ -545,9 +670,21 @@ sk_fix sk_train_grads(sk_train *t, const int *tokens, int ntok,
    positions, so the accumulated sum is divided by the position count.
    Accumulating a plain sum made every gradient n times too large - the
    numerical checker showed it directly. */
-static sk_i32 sk_mean_grad(const sk_priv *p, sk_i32 sum)
+/* Mean gradient for one accumulator.
+ *
+ * `gained` says whether this accumulator carries SK_GRAD_GAIN. Passing it
+ * explicitly rather than deciding by kind means the two places that know -
+ * here and sk_tr_back - are the only places the decision is made, and a
+ * mismatch shows up immediately as every gradient being 64x off, which the
+ * checker reports as "unresolved" rather than as a wrong number.
+ *
+ * Mean first, then the gain: the other order throws away six bits before the
+ * division by the position count. */
+static sk_i32 sk_mean_grad(const sk_priv *p, sk_i32 sum, int gained)
 {
-    return (p->grad_count > 0) ? (sum / p->grad_count) : sum;
+    sk_i32 m = (p->grad_count > 0) ? (sum / p->grad_count) : sum;
+
+    return gained ? (m / SK_GRAD_GAIN) : m;
 }
 
 /* One row scale: read, step, write back, and add to the drift sums.
@@ -606,7 +743,8 @@ void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust)
     for (r = 0; r < SK_T_VOCAB; r++) {
         if (p->g_emb[r] == 0)
             continue;
-        sk_upd_scale_row(&m->out, (sk_u32)r, sk_mean_grad(p, p->g_emb[r]),
+        sk_upd_scale_row(&m->out, (sk_u32)r,
+                         sk_mean_grad(p, p->g_emb[r], 0),
                          lr24, &p->avg[r], trust, &sum_before, &sum_after);
         changed++;
     }
@@ -616,7 +754,7 @@ void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust)
         if (p->g_f1[r] == 0)
             continue;
         sk_upd_scale_row(&m->f1[last], (sk_u32)r,
-                         sk_mean_grad(p, p->g_f1[r]),
+                         sk_mean_grad(p, p->g_f1[r], 0),
                          lr24, &p->avg_f1[r], trust,
                          &sum_before, &sum_after);
         changed++;
@@ -625,7 +763,7 @@ void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust)
         if (p->g_f2[r] == 0)
             continue;
         sk_upd_scale_row(&m->f2[last], (sk_u32)r,
-                         sk_mean_grad(p, p->g_f2[r]),
+                         sk_mean_grad(p, p->g_f2[r], 0),
                          lr24, &p->avg_f2[r], trust,
                          &sum_before, &sum_after);
         changed++;
@@ -639,7 +777,8 @@ void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust)
         for (r = 0; r < m->D; r++) {
             if (p->g_gf[r] == 0)
                 continue;
-            gainrow[r] = sk_upd_gain(gainrow[r], sk_mean_grad(p, p->g_gf[r]),
+            gainrow[r] = sk_upd_gain(gainrow[r],
+                                     sk_mean_grad(p, p->g_gf[r], 1),
                                      lr24, &p->avg_gf[r], trust);
             any = 1;
         }
@@ -652,7 +791,8 @@ void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust)
         for (r = 0; r < m->D; r++) {
             if (p->g_g2[r] == 0)
                 continue;
-            gainrow[r] = sk_upd_gain(gainrow[r], sk_mean_grad(p, p->g_g2[r]),
+            gainrow[r] = sk_upd_gain(gainrow[r],
+                                     sk_mean_grad(p, p->g_g2[r], 1),
                                      lr24, &p->avg_g2[r], trust);
             any = 1;
         }
@@ -682,6 +822,7 @@ sk_i32 sk_train_grad_row(sk_train *t, int r)
        SK_FIX_MAX>>8), and a large-dot row reaches 283: converting here hid
        that as a plausible-looking -128.000000. The caller decides how to
        scale. */
+    /* Raw: dscale never carried the gain. */
     if (p->grad_count > 0)
         return p->g_emb[r] / p->grad_count;
     return p->g_emb[r];
@@ -700,6 +841,41 @@ sk_i32 sk_train_drift(sk_train *t)
  * Returning a raw sum here made the checker report every row as n times too
  * large on the very first run.
  * ------------------------------------------------------------------- */
+
+sk_fix sk_train_dw_get(sk_train *t, int kind, int index)
+{
+    sk_priv *p;
+    sk_model *m;
+    sk_i32 n;
+    sk_i32 *buf;
+
+    if (t == SK_NULL || t->priv == SK_NULL || index < 0)
+        return 0;
+    p = sk_p(t);
+    m = t->m;
+
+    if (kind == SK_P_DW_F1) {
+        if (index >= m->HID * m->D)
+            return 0;
+        buf = p->dw_f1;
+        n = m->HID * m->D;
+    } else if (kind == SK_P_DW_F2) {
+        if (index >= m->D * m->HID)
+            return 0;
+        buf = p->dw_f2;
+        n = m->D * m->HID;
+    } else {
+        return 0;
+    }
+    if (buf == SK_NULL)
+        return 0;
+    (void)n;
+    /* Mean over answer positions, like every other gradient this module
+       reports: the loss is a mean, so its derivative is one too. */
+    if (p->grad_count > 0)
+        return (buf[index] / p->grad_count) / SK_GRAD_GAIN;
+    return buf[index] / SK_GRAD_GAIN;
+}
 
 sk_fix sk_train_grad_get(sk_train *t, int kind, int index)
 {
@@ -720,13 +896,15 @@ sk_fix sk_train_grad_get(sk_train *t, int kind, int index)
     case SK_P_GF:
         if (index < 0 || index >= m->D)
             return 0;
-        return (p->grad_count > 0) ? (p->g_gf[index] / p->grad_count)
-                                   : p->g_gf[index];
+        return (p->grad_count > 0)
+               ? ((p->g_gf[index] / p->grad_count) / SK_GRAD_GAIN)
+               : (p->g_gf[index] / SK_GRAD_GAIN);
     case SK_P_G2:
         if (index < 0 || index >= m->D)
             return 0;
-        return (p->grad_count > 0) ? (p->g_g2[index] / p->grad_count)
-                                   : p->g_g2[index];
+        return (p->grad_count > 0)
+               ? ((p->g_g2[index] / p->grad_count) / SK_GRAD_GAIN)
+               : (p->g_g2[index] / SK_GRAD_GAIN);
     case SK_P_F1:
         if (index < 0 || index >= m->HID)
             return 0;
