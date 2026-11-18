@@ -23,6 +23,7 @@
 #include "sk_tensor.h"
 #include "sk_forward.h"
 #include "sk_train.h"
+#include "sk_shadow.h"
 #include "sk_selftest.h"
 
 #define SK_VERSION "0.1.0-m0"
@@ -56,6 +57,33 @@ typedef struct {
     char  *filev[64];
 } sk_opts;
 
+/* Every mode, in one place.
+ *
+ * The list existed twice until it drifted: "ingest" and "shadow" were in the
+ * dispatcher and not in the argument parser, so `skynet shadow file` fell
+ * through to `run`, started the prime clock and printed prime numbers. The
+ * parser now asks sk_is_mode() instead of repeating the names, and
+ * tools/hygiene.py checks that every name here has a branch in main() and
+ * every branch here has a name - so a half-added mode fails the build rather
+ * than surprising somebody.
+ *
+ * A mode added here also needs a line in sk_usage(). */
+static const char *const sk_modes[] = {
+    "run", "ingest", "train", "recover", "mem", "model", "predict", "ask",
+    "shadow", "selftest"
+};
+#define SK_NMODES ((int)(sizeof(sk_modes) / sizeof(sk_modes[0])))
+
+static int sk_is_mode(const char *a)
+{
+    int i;
+
+    for (i = 0; i < SK_NMODES; i++)
+        if (strcmp(a, sk_modes[i]) == 0)
+            return 1;
+    return 0;
+}
+
 static void sk_usage(void)
 {
     printf("SkyNet %s - a self-contained agent core for retro targets\n", SK_VERSION);
@@ -70,6 +98,7 @@ static void sk_usage(void)
     printf("  model FILE load a TNY2 model and report what it contains\n");
     printf("  predict FILE TEXT  run the forward pass and print the scores\n");
     printf("  ask FILE QUESTION  generate an answer (default creativity 0)\n");
+    printf("  shadow FILE prove the trainable masters round-trip exactly\n");
     printf("  selftest   check every core invariant\n");
     printf("\n");
     printf("options\n");
@@ -735,6 +764,234 @@ static int cmd_train(const sk_opts *o)
     return 0;
 }
 
+/* shadow - prove the master representation is lossless.
+ *
+ * The whole plan for training our own weights rests on one claim: the codes
+ * and the Q8.24 masters describe the same numbers, so a table can be expanded,
+ * left alone, and compressed back into exactly the bytes it came from. If
+ * that did not hold, every training run would be measuring a model that is
+ * not the one being shipped.
+ *
+ * So this does the round trip on the real weights and compares every scale
+ * and every code, element by element. A CRC would be shorter but would only
+ * say "something differs"; this says which table and how many elements, which
+ * is the difference between a five-minute fix and an afternoon.
+ */
+static int cmd_shadow(const sk_opts *o)
+{
+    sk_model m;
+    sk_arena arena;
+    void *weights;
+    sk_u32 need, maxshadow = 0;
+    char why[64];
+    const char *path;
+    unsigned char hdr[12];
+    FILE *fp;
+    sk_i32 *w;
+    signed char *c0, *c1;
+    sk_fix *s0, *s1;
+    sk_u32 s0crc, s1crc;
+    int l, bad_tables = 0, lossy_tables = 0;
+    long total_bad = 0, total_all = 0;
+
+    setvbuf(stdout, SK_NULL, _IONBF, 0);
+    sk_math_init();
+
+    path = (o->files > 0) ? o->filev[0] : o->out;
+
+    fp = fopen(path, "rb");
+    if (fp == SK_NULL) {
+        printf("[sky] cannot open model '%s'\n", path);
+        return 6;
+    }
+    if (fread(hdr, 1, 12, fp) != 12 || memcmp(hdr, "TNY2", 4) != 0) {
+        fclose(fp);
+        printf("[sky] '%s' is not a TNY2 model\n", path);
+        return 6;
+    }
+    fclose(fp);
+
+    need = sk_model_size_bits((sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8)),
+                              (sk_u32)((sk_u32)hdr[6] | ((sk_u32)hdr[7] << 8)),
+                              (sk_u32)(hdr[10] | ((sk_u32)hdr[11] << 8)),
+                              97UL, 128UL, o->bits);
+    if (!sk_arena_init(&arena, need + (32UL * 1024UL * 1024UL), SK_MEM_OS)) {
+        printf("[sky] arena failed\n");
+        return 3;
+    }
+    weights = sk_arena_alloc(&arena, need);
+    if (weights == SK_NULL) {
+        printf("[sky] cannot get %lu bytes for the weights\n",
+               (unsigned long)need);
+        sk_arena_done(&arena);
+        return 3;
+    }
+    if (!sk_pool_open_from(&m.pool, need, weights)) {
+        sk_arena_done(&arena);
+        return 3;
+    }
+    if (!sk_model_load_shaped(&m, path, &m.pool, o->layers, o->hid, o->bits,
+                              why, (sk_u32)sizeof(why))) {
+        printf("[sky] load failed: %s\n", why);
+        sk_arena_done(&arena);
+        return 6;
+    }
+
+    /* One buffer sized for the largest table in this model. */
+    for (l = -1; l < m.L; l++) {
+        const sk_table *set[6];
+        int nt, t;
+
+        if (l < 0) {
+            set[0] = &m.emb;
+            set[1] = &m.pos;
+            nt = 2;
+        } else {
+            set[0] = &m.wq[l]; set[1] = &m.wk[l]; set[2] = &m.wv[l];
+            set[3] = &m.wo[l]; set[4] = &m.f1[l]; set[5] = &m.f2[l];
+            nt = 6;
+        }
+        for (t = 0; t < nt; t++) {
+            sk_u32 b = sk_shadow_bytes(set[t]);
+
+            if (b > maxshadow)
+                maxshadow = b;
+        }
+    }
+
+    w = (sk_i32 *)sk_arena_alloc(&arena, maxshadow);
+    c0 = (signed char *)sk_arena_alloc(&arena, (sk_u32)SK_T_MAXHID
+                                       * (sk_u32)SK_T_MAXD);
+    c1 = (signed char *)sk_arena_alloc(&arena, (sk_u32)SK_T_MAXHID
+                                       * (sk_u32)SK_T_MAXD);
+    s0 = (sk_fix *)sk_arena_alloc(&arena, (sk_u32)SK_T_MAXHID * 4UL);
+    s1 = (sk_fix *)sk_arena_alloc(&arena, (sk_u32)SK_T_MAXHID * 4UL);
+    if (w == SK_NULL || c0 == SK_NULL || c1 == SK_NULL
+        || s0 == SK_NULL || s1 == SK_NULL) {
+        printf("[sky] cannot get the scratch the round trip needs\n");
+        sk_arena_done(&arena);
+        return 3;
+    }
+
+    s0crc = sk_model_weights_crc(&m);
+    printf("[sky] weights CRC before  %08lX\n", (unsigned long)s0crc);
+    printf("[sky] masters needed: %lu KB for the largest table\n",
+           (unsigned long)(maxshadow / 1024UL));
+    printf("\n%-10s %-11s %6s %6s  %s\n", "table", "shape", "scales", "codes",
+           "result");
+
+    for (l = -1; l < m.L; l++) {
+        const sk_table *set[6];
+        const char *names[6];
+        int nt, t;
+
+        if (l < 0) {
+            set[0] = &m.emb;      names[0] = "emb";
+            set[1] = &m.pos;      names[1] = "pos";
+            nt = 2;
+        } else {
+            set[0] = &m.wq[l];    names[0] = "q";
+            set[1] = &m.wk[l];    names[1] = "k";
+            set[2] = &m.wv[l];    names[2] = "v";
+            set[3] = &m.wo[l];    names[3] = "o";
+            set[4] = &m.f1[l];    names[4] = "f1";
+            set[5] = &m.f2[l];    names[5] = "f2";
+            nt = 6;
+        }
+
+        for (t = 0; t < nt; t++) {
+            const sk_table *tab = set[t];
+            sk_u32 r, j, n;
+            int bscale = 0;
+            long bcode = 0;
+            char label[24];
+
+            n = tab->rows * tab->cols;
+
+            for (r = 0; r < tab->rows; r++) {
+                if (!sk_table_scale_read(tab, r, &s0[r]))
+                    return 7;
+                if (!sk_table_read_row(tab, r, c0 + r * tab->cols))
+                    return 7;
+            }
+
+            if (!sk_shadow_load(tab, w) || !sk_shadow_store(tab, w)) {
+                printf("%-10s %-11s FAILED to expand or compress\n",
+                       names[t], "");
+                bad_tables++;
+                continue;
+            }
+
+            for (r = 0; r < tab->rows; r++) {
+                if (!sk_table_scale_read(tab, r, &s1[r]))
+                    return 7;
+                if (!sk_table_read_row(tab, r, c1 + r * tab->cols))
+                    return 7;
+                if (s0[r] != s1[r])
+                    bscale++;
+                for (j = 0; j < tab->cols; j++)
+                    if (c0[r * tab->cols + j] != c1[r * tab->cols + j])
+                        bcode++;
+            }
+
+            if (l < 0)
+                sprintf(label, "%s", names[t]);
+            else
+                sprintf(label, "L%d.%s", l, names[t]);
+
+            total_bad += bcode + bscale;
+            total_all += (long)n + (long)tab->rows;
+
+            if (bcode == 0 && bscale == 0)
+                printf("%-10s %4lux%-6lu %6d %6ld  identical\n",
+                       label, (unsigned long)tab->rows,
+                       (unsigned long)tab->cols, bscale, bcode);
+            else if (tab->bits == 4) {
+                /* Expected, and worth distinguishing from a bug: the nibble
+                   range is -8..7 and -8 expands to -127, which comes back as
+                   -7. The 4-bit format cannot hold its own minimum. */
+                printf("%-10s %4lux%-6lu %6d %6ld"
+                       "  lossy, as expected for 4 bits\n",
+                       label, (unsigned long)tab->rows,
+                       (unsigned long)tab->cols, bscale, bcode);
+                lossy_tables++;
+            } else {
+                printf("%-10s %4lux%-6lu %6d %6ld  DIFFERS\n",
+                       label, (unsigned long)tab->rows,
+                       (unsigned long)tab->cols, bscale, bcode);
+                bad_tables++;
+            }
+            (void)n;
+        }
+    }
+
+    s1crc = sk_model_weights_crc(&m);
+    printf("\n[sky] weights CRC after   %08lX\n", (unsigned long)s1crc);
+    printf("[sky] %ld of %ld values differ after the round trip\n",
+           total_bad, total_all);
+
+    sk_arena_done(&arena);
+
+    if (bad_tables > 0) {
+        printf("[sky] FAILED: %d table(s) do not survive the round trip\n",
+               bad_tables);
+        return 1;
+    }
+    if (lossy_tables > 0) {
+        printf("[sky] %d table(s) are 4-bit and lossy by construction;"
+               " 8-bit tables are exact\n", lossy_tables);
+        return 0;
+    }
+    if (s0crc != s1crc) {
+        /* Every element matched, so a different CRC means the CRC covers
+           bytes this loop does not - which is itself worth knowing. */
+        printf("[sky] FAILED: every element matched but the CRC moved\n");
+        return 1;
+    }
+    printf("[sky] round trip is exact: the masters are the weights\n");
+    return 0;
+}
+
 static int cmd_mem(void)
 {
     sk_meminfo mi;
@@ -1217,14 +1474,7 @@ int main(int argc, char **argv)
             printf("[sky] unknown option %s\n", a);
             sk_usage();
             return 2;
-        } else if (o.files == 0
-                   && (strcmp(a, "run") == 0 || strcmp(a, "train") == 0
-                       || strcmp(a, "recover") == 0
-                       || strcmp(a, "mem") == 0
-                       || strcmp(a, "model") == 0
-                       || strcmp(a, "predict") == 0
-                       || strcmp(a, "ask") == 0
-                       || strcmp(a, "selftest") == 0)) {
+        } else if (o.files == 0 && sk_is_mode(a)) {
             o.mode = a;
         } else if (o.files < 64) {
             o.filev[o.files++] = argv[i];
@@ -1238,6 +1488,8 @@ int main(int argc, char **argv)
         return cmd_selftest();
     if (strcmp(o.mode, "mem") == 0)
         return cmd_mem();
+    if (strcmp(o.mode, "shadow") == 0)
+        return cmd_shadow(&o);
     if (strcmp(o.mode, "model") == 0)
         return cmd_model(&o);
     if (strcmp(o.mode, "predict") == 0)

@@ -642,6 +642,64 @@ int sk_table_read_row(const sk_table *t, sk_u32 row, signed char *out)
     return 1;
 }
 
+/* Sketch of the 4-bit inverse, derived from sk_q4_init rather than guessed:
+ *   q8 = round(n * 127 / 7)   =>   n = round(q8 * 7 / 127)
+ * The rounding has to match, or a table that is read and written back
+ * unchanged will drift a nibble at a time - which is the sort of error that
+ * looks like a training bug three commits later. */
+static int sk_q8_to_q4(signed char v)
+{
+    int n;
+
+    sk_q4_init();
+    /* No range clamp needed: signed char is already -128..127 and the q4
+       mapping only cares about magnitude. The clamp that was here compared a
+       signed char against 127 and the compiler correctly pointed out that
+       it can never exceed it. */
+    n = (v * 7 + (v >= 0 ? 63 : -63)) / 127;
+    if (n > 7) n = 7;
+    if (n < -8) n = -8;
+    return n;
+}
+
+int sk_table_write_row(const sk_table *t, sk_u32 row, const signed char *in)
+{
+    unsigned char bytes[SK_T_MAXHID];
+    unsigned char packed[(SK_T_MAXHID + 1) / 2];
+    sk_u32 stride;
+    sk_u32 wbase;
+    sk_u32 j;
+
+    if (t == SK_NULL || in == SK_NULL || t->pool == SK_NULL || row >= t->rows)
+        return 0;
+    if (t->cols > (sk_u32)SK_T_MAXHID)
+        return 0;
+
+    stride = sk_table_stride(t->cols, t->bits);
+    wbase = t->base + t->rows * 4UL;
+
+    if (t->bits == 4) {
+        for (j = 0; j < stride; j++)
+            packed[j] = 0;
+        for (j = 0; j < t->cols; j++) {
+            int n = sk_q8_to_q4(in[j]) & 0x0F;
+            unsigned char b;
+
+            if (j & 1)
+                packed[j / 2] = (unsigned char)(packed[j / 2] | n);
+            else {
+                b = packed[j / 2];
+                packed[j / 2] = (unsigned char)((b & 0x0F) | (n << 4));
+            }
+        }
+        return sk_pool_write(t->pool, wbase + row * stride, packed, stride);
+    }
+
+    for (j = 0; j < t->cols; j++)
+        bytes[j] = (unsigned char)in[j];
+    return sk_pool_write(t->pool, wbase + row * stride, bytes, t->cols);
+}
+
 int sk_table_matvec_noscale(const sk_table *t, const sk_fix *x, sk_fix *y)
 {
     signed char w[SK_T_MAXHID];

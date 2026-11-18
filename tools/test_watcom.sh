@@ -74,7 +74,7 @@ export INCLUDE="$WATCOM/h"
 rm -rf build_dos && mkdir -p build_dos
 
 fail=0
-for f in main sk_math sk_arena sk_clock sk_vault sk_sched sk_io sk_mem sk_tensor sk_forward sk_grad sk_train sk_selftest; do
+for f in main sk_math sk_arena sk_clock sk_vault sk_sched sk_io sk_mem sk_tensor sk_forward sk_grad sk_train sk_shadow sk_selftest; do
     printf '  wcc %s.c ... ' "$f"
     if wcc -ml -zq -Isrc -fo=build_dos/ "src/$f.c" >"build_dos/$f.log" 2>&1; then
         echo ok
@@ -102,7 +102,7 @@ echo "== link"
 # With selftest frames on top of that, 2 KB overflows and the program dies
 # with no output at all - which is exactly how the first DOS run failed.
 LINK_ARGS="system dos name build_dos/skynet.exe option stack=8192"
-for o in main sk_math sk_arena sk_clock sk_vault sk_sched sk_io sk_mem sk_tensor sk_forward sk_grad sk_train sk_selftest; do
+for o in main sk_math sk_arena sk_clock sk_vault sk_sched sk_io sk_mem sk_tensor sk_forward sk_grad sk_train sk_shadow sk_selftest; do
     LINK_ARGS="$LINK_ARGS file build_dos/$o.o"
 done
 # shellcheck disable=SC2086

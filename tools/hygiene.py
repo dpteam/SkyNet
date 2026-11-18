@@ -17,6 +17,7 @@ Checks (each maps to an invariant in docs/01-architecture.md):
 Run:  python tools/hygiene.py [--verbose]
 Exit: 0 clean, 1 violations
 """
+import io
 import os
 import re
 import sys
@@ -176,6 +177,44 @@ def check_file(path, verbose):
     return problems
 
 
+def check_modes():
+    """Every mode in sk_modes needs a branch, and every branch a mode.
+
+    This check exists because the two lists DID drift, silently: "ingest" and
+    "shadow" were handled by the dispatcher and missing from the argument
+    parser, so `skynet shadow model.bin` parsed "shadow" as a filename, fell
+    through to the default mode and started the prime clock. The command
+    looked like it ran - it printed plausible numbers - and only the wrong
+    ones.
+
+    Parsing the C here is crude on purpose: this is a consistency check on
+    literal strings, not a compiler.
+    """
+    path = os.path.join(SRC, "main.c")
+    text = io.open(path, encoding="utf-8").read()
+
+    listed = set()
+    m = re.search(r"sk_modes\[\]\s*=\s*\{(.*?)\};", text, re.S)
+    if not m:
+        return [(0, "main.c: sk_modes[] not found")]
+
+    for s in re.findall(r'"([a-z]+)"', m.group(1)):
+        if s in listed:
+            return [(0, "main.c: mode %r listed twice" % s)]
+        listed.add(s)
+
+    dispatched = set(re.findall(r'strcmp\(o\.mode, "([a-z]+)"\)', text))
+
+    problems = []
+    for name in sorted(listed - dispatched):
+        problems.append((0, 'main.c: mode "%s" is listed but has no branch'
+                         % name))
+    for name in sorted(dispatched - listed):
+        problems.append((0, 'main.c: branch for "%s" is not in sk_modes[]'
+                         % name))
+    return problems
+
+
 def main():
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
     files = sorted(
@@ -192,6 +231,10 @@ def main():
         for line, msg in problems:
             print("%s:%d: %s" % (os.path.basename(path), line, msg))
             total += 1
+
+    for line, msg in check_modes():
+        print(msg)
+        total += 1
 
     if total:
         print("\nhygiene: %d violation(s). See docs/01-architecture.md" % total)

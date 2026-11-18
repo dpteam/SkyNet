@@ -316,6 +316,21 @@ jobs:
              src/sk_forward.c src/sk_grad.c src/sk_train.c -lm
           ./build/gradcheck tests/fixtures/TINY.BIN build/dataset.txt
 
+      - name: the weight masters round-trip exactly
+        run: |
+          set -e
+          # Training the weights needs a copy of each weight that is finer
+          # than the stored code, and invariant I1 forbids a float master.
+          # The substitute is Q8.24, and it is only valid if expanding the
+          # codes into masters and compressing them back reproduces the exact
+          # bytes. If that failed, every training run would measure a model
+          # that is not the one being shipped.
+          #
+          # Checked element by element rather than by CRC: a CRC says
+          # "something differs", and this says which table and how many.
+          ./skynet shadow tests/fixtures/TINY.BIN
+          ./skynet shadow tests/fixtures/TINY.BIN --bits 4
+
       - name: the per-weight gradient is structurally sound
         run: |
           set -e

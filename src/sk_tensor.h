@@ -168,6 +168,17 @@ int sk_table_matvec(const sk_table *t, const sk_fix *x, sk_fix *y);
 /* Read a row as raw int8 values, whatever the stored width. */
 int sk_table_read_row(const sk_table *t, sk_u32 row, signed char *out);
 
+/* Write one row of codes back. The grader needs this: training the weights
+ * means replacing them, and without a writer the only way to change a table
+ * is to rebuild the whole file.
+ *
+ * For an 8-bit table this is the inverse of sk_table_read_row exactly. For a
+ * 4-bit table it is NOT: the nibble range is -8..7 and the value -8 expands
+ * to -127, which comes back as -7. The 4-bit representation cannot hold its
+ * own most negative value, which is a property of the format and not of this
+ * function - see docs/05-compression.md. */
+int sk_table_write_row(const sk_table *t, sk_u32 row, const signed char *in);
+
 /* Read and write one row scale (Q8.24). */
 int sk_table_scale_read(const sk_table *t, sk_u32 row, sk_fix *out);
 int sk_table_scale_write(const sk_table *t, sk_u32 row, sk_fix v);
