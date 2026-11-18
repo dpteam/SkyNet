@@ -134,6 +134,7 @@ SkyNet/
 | **EMS на DOS** | **15 168 КБ страничной памяти** | `skynet mem` в DOSBox |
 | **TINY.BIN на DOS** | **384 КБ в 24 EMS-страницах, CRC MATCH** | `skynet model TINY.BIN` |
 | **Forward pass на DOS** | **побитово равен x86_64** | `skynet predict` в DOSBox |
+| **Ответы** | **35/35 верных, 36/38 побитово как оригинал** | `tools/ask_accuracy.py` |
 | Компиляторы | gcc, clang, tcc, OpenWatcom (16-бит) | 0 предупреждений при `-Wall -Wextra -pedantic` |
 | Цена fsync | **85 мс** против **0.1 мс** работы | `tests/bench_io.c` |
 
@@ -166,6 +167,16 @@ HOST: scores -11.1387 -2.5737 11.4118 17.4864 -8.3587 -11.0526 ...
 это released forward pass, скомпилированный для хоста, а не моя
 переписка). Расхождение 0.3–1.2% — это квантование KV-кэша в int8,
 которое делает сам оригинал.
+
+А ответы проверяются отдельно, потому что «совпадает с эталоном» и
+«отвечает правильно» — разные утверждения:
+
+```
+$ skynet ask TINY.BIN "what is 7 times 8"
+answer 7 times 8 is 56.
+
+35/35 correct on the documented question list
+```
 
 Последняя строка про fsync — причина, по которой durability-политика
 вынесена наружу явным флагом `--durable`, а не спрятана внутри библиотеки.
