@@ -19,11 +19,16 @@
  * malloc hands back a tiny block, and the arena then believes it owns
  * megabytes.  That is silent memory corruption, so it is refused here
  * instead.  Bigger arenas on DOS need the EMS/XMS backends (M1), which
- * piece memory together from 64 KB pages. */
+ * piece memory together from 64 KB pages.
+ *
+ * The guard is a #if rather than a runtime comparison, because on a 32-bit
+ * size_t the limit does not exist and `bytes > 0xFFFFFFFFUL` is a
+ * comparison that is always false - which -Werror correctly rejects. */
 #if UINT_MAX <= 0xFFFFUL
+#  define SK_ARENA_HAS_BLOCK_LIMIT 1
 #  define SK_ARENA_MAX_BLOCK 0xFF00UL
 #else
-#  define SK_ARENA_MAX_BLOCK 0xFFFFFFFFUL
+#  define SK_ARENA_HAS_BLOCK_LIMIT 0
 #endif
 
 int sk_arena_init(sk_arena *a, sk_u32 bytes, int backend)
@@ -35,8 +40,10 @@ int sk_arena_init(sk_arena *a, sk_u32 bytes, int backend)
         return 0;                     /* other backends arrive in M1 */
     if (bytes == 0)
         return 0;
+#if SK_ARENA_HAS_BLOCK_LIMIT
     if (bytes > SK_ARENA_MAX_BLOCK)
         return 0;                     /* see SK_ARENA_MAX_BLOCK above */
+#endif
     a->base = (sk_u8 *)malloc((size_t)bytes);
     if (a->base == SK_NULL)
         return 0;
@@ -52,8 +59,10 @@ sk_u32 sk_arena_init_best(sk_arena *a, sk_u32 want, sk_u32 least, int backend)
 
     if (a == SK_NULL || want == 0 || least == 0 || least > want)
         return 0;
+#if SK_ARENA_HAS_BLOCK_LIMIT
     if (want > SK_ARENA_MAX_BLOCK)
         want = SK_ARENA_MAX_BLOCK;
+#endif
 
     /* Degrade, do not fail (invariant I6).  Ask for what the caller wants,
        then halve until something fits or we reach the floor.  On DOS this

@@ -286,84 +286,102 @@ int sk_pool_open(sk_pool *p, sk_u32 bytes)
 #endif
 }
 
+int sk_pool_open_from(sk_pool *p, sk_u32 bytes, const void *src)
+{
+    if (p == SK_NULL || src == SK_NULL || bytes == 0)
+        return 0;
+    memset(p, 0, sizeof(*p));
+    p->mapped = -1;
+    p->backend = SK_POOL_LINEAR;
+    p->base = (unsigned char *)src;    /* caller owns the memory */
+    p->bytes = bytes;
+    p->ready = 1;
+    return 1;
+}
+
 int sk_pool_read(sk_pool *p, sk_u32 off, void *dst, sk_u32 len)
 {
-#if !defined(SK_HAVE_BIOS)
-    /* No EMS without BIOS access, so there is nothing to read from.  Said
-       explicitly rather than left to fall out of the unused-variable
-       warning, which is how this was first noticed. */
-    (void)p; (void)off; (void)dst; (void)len;
-    return 0;
-#else
-    unsigned char *d = (unsigned char *)dst;
-
     if (p == SK_NULL || !p->ready || dst == SK_NULL)
         return 0;
     if (off > p->bytes || len > p->bytes - off)
         return 0;
-    if (p->backend != SK_POOL_EMS)
-        return 0;
 
-    while (len > 0) {
-        sk_u32 page = off / SK_EMS_PAGE;
-        sk_u32 within = off % SK_EMS_PAGE;
-        sk_u32 chunk = SK_EMS_PAGE - within;
-
-        if (chunk > len)
-            chunk = len;
-
-        if (!sk_pool_map(p, page))
-            return 0;
+    if (p->backend == SK_POOL_LINEAR) {
+        memcpy(dst, p->base + off, (size_t)len);
+        p->reads++;
+        return 1;
+    }
 
 #if defined(SK_HAVE_BIOS)
-        memcpy(d, SK_EMS_WINDOW(p->frame_seg) + within, (size_t)chunk);
-#endif
+    {
+        unsigned char *d = (unsigned char *)dst;
 
-        d += chunk;
-        off += chunk;
-        len -= chunk;
-        p->reads++;
+        if (p->backend != SK_POOL_EMS)
+            return 0;
+
+        while (len > 0) {
+            sk_u32 page = off / SK_EMS_PAGE;
+            sk_u32 within = off % SK_EMS_PAGE;
+            sk_u32 chunk = SK_EMS_PAGE - within;
+
+            if (chunk > len)
+                chunk = len;
+            if (!sk_pool_map(p, page))
+                return 0;
+            memcpy(d, SK_EMS_WINDOW(p->frame_seg) + within, (size_t)chunk);
+
+            d += chunk;
+            off += chunk;
+            len -= chunk;
+            p->reads++;
+        }
+        return 1;
     }
-    return 1;
+#else
+    return 0;
 #endif
 }
 
 int sk_pool_write(sk_pool *p, sk_u32 off, const void *src, sk_u32 len)
 {
-#if !defined(SK_HAVE_BIOS)
-    (void)p; (void)off; (void)src; (void)len;
-    return 0;
-#else
-    const unsigned char *s = (const unsigned char *)src;
-
     if (p == SK_NULL || !p->ready || src == SK_NULL)
         return 0;
     if (off > p->bytes || len > p->bytes - off)
         return 0;
-    if (p->backend != SK_POOL_EMS)
-        return 0;
 
-    while (len > 0) {
-        sk_u32 page = off / SK_EMS_PAGE;
-        sk_u32 within = off % SK_EMS_PAGE;
-        sk_u32 chunk = SK_EMS_PAGE - within;
-
-        if (chunk > len)
-            chunk = len;
-
-        if (!sk_pool_map(p, page))
-            return 0;
+    if (p->backend == SK_POOL_LINEAR) {
+        memcpy(p->base + off, src, (size_t)len);
+        p->writes++;
+        return 1;
+    }
 
 #if defined(SK_HAVE_BIOS)
-        memcpy(SK_EMS_WINDOW(p->frame_seg) + within, s, (size_t)chunk);
-#endif
+    {
+        const unsigned char *s = (const unsigned char *)src;
 
-        s += chunk;
-        off += chunk;
-        len -= chunk;
-        p->writes++;
+        if (p->backend != SK_POOL_EMS)
+            return 0;
+
+        while (len > 0) {
+            sk_u32 page = off / SK_EMS_PAGE;
+            sk_u32 within = off % SK_EMS_PAGE;
+            sk_u32 chunk = SK_EMS_PAGE - within;
+
+            if (chunk > len)
+                chunk = len;
+            if (!sk_pool_map(p, page))
+                return 0;
+            memcpy(SK_EMS_WINDOW(p->frame_seg) + within, s, (size_t)chunk);
+
+            s += chunk;
+            off += chunk;
+            len -= chunk;
+            p->writes++;
+        }
+        return 1;
     }
-    return 1;
+#else
+    return 0;
 #endif
 }
 

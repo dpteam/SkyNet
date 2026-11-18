@@ -69,6 +69,7 @@ typedef struct {
     sk_u32 frame_seg;
     int    mapped;        /* which logical page is in slot 0, or -1 */
     int    ready;
+    unsigned char *base;  /* linear backend only: caller-owned buffer */
     sk_u32 reads;
     sk_u32 writes;
     sk_u32 maps;

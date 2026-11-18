@@ -445,3 +445,52 @@ sk_u32 sk_crc32c(const void *data, sk_u32 len)
 {
     return sk_crc32c_update(0UL, data, len);
 }
+
+/* ------------------------------------------------------------------ */
+/* IEEE-754 binary32 -> Q16.16                                        */
+/* ------------------------------------------------------------------ */
+
+sk_fix sk_f32_to_fix(sk_u32 bits)
+{
+    sk_u32 exp;
+    sk_u32 mant;
+    int    sign;
+    int    shift;
+    sk_u32 v;
+
+    sign = (int)(bits >> 31);
+    exp  = (bits >> 23) & 0xFFUL;
+    mant = bits & 0x7FFFFFUL;
+
+    if (exp == 0) {
+        /* zero or subnormal.  Subnormals are below 2^-126, which is far
+           under one LSB of Q16.16, so they round to zero. */
+        return 0;
+    }
+    if (exp == 0xFFUL) {
+        /* Inf or NaN: a weight file containing this is corrupt.  Saturate
+           so the damage is visible and bounded. */
+        return sign ? SK_FIX_MIN : SK_FIX_MAX;
+    }
+
+    mant |= 0x800000UL;                /* restore the implicit leading 1 */
+    shift = (int)exp - 134;            /* value * 2^16 = mant * 2^shift */
+
+    if (shift >= 0) {
+        if (shift >= 8 || (mant >> (32 - shift)) != 0) {
+            /* mant << shift would not fit in 32 bits */
+            return sign ? SK_FIX_MIN : SK_FIX_MAX;
+        }
+        v = SK_U32(mant << shift);
+        if (v > (sk_u32)SK_FIX_MAX)
+            return sign ? SK_FIX_MIN : SK_FIX_MAX;
+    } else {
+        int down = -shift;
+        if (down >= 32)
+            v = 0;
+        else
+            v = SK_U32(mant >> down);
+    }
+
+    return sign ? -(sk_fix)v : (sk_fix)v;
+}

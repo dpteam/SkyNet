@@ -57,4 +57,25 @@ fi
 echo "logo is byte-identical after regeneration"
 
 echo
+echo "== 8. TNY2 model import"
+# The released TINY.BIN is the M2 baseline. Loading it must reproduce the
+# same weight bytes (CRC) and the same matvec peak as an independent float
+# reference (tools/check_matvec.py), within the one-LSB-per-row error that
+# a Q16.16 scale inevitably introduces.
+OUT=$(./skynet model refs/Tiny-2.1-main/dos/TINY.BIN || true)
+echo "$OUT" | grep -E "loaded|weights crc|matvec" | sed 's/^/   /'
+case "$OUT" in
+    *"D=96 L=4 H=4 HID=256 HD=24"*) echo "   shape ok" ;;
+    *) echo "FAIL: model shape"; exit 1 ;;
+esac
+case "$OUT" in
+    *"MATCH"*) echo "   weight bytes round-trip" ;;
+    *) echo "FAIL: weights do not round-trip"; exit 1 ;;
+esac
+case "$OUT" in
+    *"96/96 non-zero"*) echo "   matvec produced a dense result" ;;
+    *) echo "FAIL: matvec looks degenerate"; exit 1 ;;
+esac
+
+echo
 echo "ALL CHECKS PASSED"

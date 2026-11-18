@@ -59,4 +59,23 @@ sk_u32 sk_crc32c(const void *data, sk_u32 len);
 /* Chainable form: pass the previous result, or 0 to start. */
 sk_u32 sk_crc32c_update(sk_u32 crc, const void *data, sk_u32 len);
 
+/* ---- IEEE-754 binary32 -> Q16.16 ---------------------------------------
+   Model files store their row scales as 4-byte floats, and the core has no
+   floating point at all (invariant I1).  So the bit pattern is converted
+   arithmetically:
+
+     float32 = (-1)^s * 1.m * 2^(e-127)     for normal numbers
+     mantissa m is the 24-bit integer (implicit 1 included)
+     value * 2^16 = m * 2^(e-127-23+16) = m * 2^(e-134)
+
+   One integer shift, exact for every value that fits Q16.16, saturating
+   outside it.  No union type-punning, no compiler float support, no
+   dependence on the host's FPU rounding mode.
+
+   Subnormals and the non-finite patterns are not needed by the model
+   format and are clamped: a scale of zero would make a whole row dead
+   anyway, and NaN/Inf in a weight file is corruption we want to see as a
+   saturation rather than as undefined behaviour. */
+sk_fix sk_f32_to_fix(sk_u32 bits);
+
 #endif /* SK_MATH_H */

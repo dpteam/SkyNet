@@ -20,6 +20,7 @@
 #include "sk_vault.h"
 #include "sk_io.h"
 #include "sk_mem.h"
+#include "sk_tensor.h"
 #include "sk_selftest.h"
 
 #define SK_VERSION "0.1.0-m0"
@@ -51,6 +52,7 @@ static void sk_usage(void)
     printf("  train      ingest the listed files into a dataset manifest\n");
     printf("  recover    show the state the vault would resume from\n");
     printf("  mem        report what memory this machine actually has\n");
+    printf("  model FILE load a TNY2 model and report what it contains\n");
     printf("  selftest   check every core invariant\n");
     printf("\n");
     printf("options\n");
@@ -132,6 +134,155 @@ static int cmd_mem(void)
     } else {
         printf("paged store: unavailable, arena stays at the 64 KB ceiling\n");
     }
+    return 0;
+}
+
+/* Load a TNY2 model and report what came out of it.  This is the M2
+   checkpoint: if the weights load and the shape is right, the inference
+   code has something real to run on instead of a toy. */
+static int cmd_model(const sk_opts *o)
+{
+    const char *path;
+    sk_model m;
+    sk_arena arena;
+    void *storage;
+    char why[64];
+    sk_u32 need;
+    sk_u32 got;
+    unsigned char hdr[12];
+    FILE *fp;
+
+    setvbuf(stdout, SK_NULL, _IONBF, 0);
+
+    path = (o->files > 0) ? o->filev[0] : o->out;
+
+    fp = fopen(path, "rb");
+    if (fp == SK_NULL) {
+        printf("[sky] cannot open model '%s'\n", path);
+        return 6;
+    }
+    if (fread(hdr, 1, 12, fp) != 12 || memcmp(hdr, "TNY2", 4) != 0) {
+        fclose(fp);
+        printf("[sky] '%s' is not a TNY2 model\n", path);
+        return 6;
+    }
+    fclose(fp);
+
+    need = sk_model_size((sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8)),
+                         (sk_u32)((sk_u32)hdr[6] | ((sk_u32)hdr[7] << 8)),
+                         (sk_u32)((sk_u32)hdr[10] | ((sk_u32)hdr[11] << 8)),
+                         97UL, 128UL);
+    printf("[sky] model needs %lu bytes of weight storage\n",
+           (unsigned long)need);
+
+    /* The weights live in a pool: EMS on DOS (up to 32 MB), a flat buffer
+       on a host.  Asking the arena instead would cap the model at 64 KB on
+       DOS, which is less than a fifth of Tiny-2.1. */
+    got = 0;
+    if (sk_pool_open(&m.pool, need)) {
+        got = m.pool.bytes;
+        printf("[sky] weights in EMS: %lu KB in %lu pages\n",
+               (unsigned long)(got / 1024UL), (unsigned long)m.pool.pages);
+    } else {
+        got = sk_arena_init_best(&arena, need + 65536UL, need, SK_MEM_OS);
+        if (got == 0) {
+            printf("[sky] cannot get %lu bytes for the weights\n",
+                   (unsigned long)need);
+            return 3;
+        }
+        storage = sk_arena_alloc(&arena, need);
+        if (storage == SK_NULL) {
+            printf("[sky] arena cannot provide %lu bytes\n",
+                   (unsigned long)need);
+            sk_arena_done(&arena);
+            return 3;
+        }
+        if (!sk_pool_open_from(&m.pool, need, storage)) {
+            printf("[sky] cannot open the weight store\n");
+            sk_arena_done(&arena);
+            return 3;
+        }
+        printf("[sky] weights in linear memory: %lu KB\n",
+               (unsigned long)(need / 1024UL));
+    }
+
+    if (!sk_model_load(&m, path, &m.pool, why, (sk_u32)sizeof(why))) {
+        printf("[sky] load failed: %s\n", why);
+        sk_arena_done(&arena);
+        return 6;
+    }
+
+    printf("[sky] loaded  D=%d L=%d H=%d HID=%d HD=%d\n",
+           m.D, m.L, m.H, m.HID, m.HD);
+    printf("[sky] weights %lu bytes, %lu used, att_div=%ld\n",
+           (unsigned long)need, (unsigned long)m.used, (long)m.att_div);
+    printf("[sky] tables  emb %lux%lu  pos %lux%lu  f1 %lux%lu  f2 %lux%lu\n",
+           (unsigned long)m.emb.rows, (unsigned long)m.emb.cols,
+           (unsigned long)m.pos.rows, (unsigned long)m.pos.cols,
+           (unsigned long)m.f1[0].rows, (unsigned long)m.f1[0].cols,
+           (unsigned long)m.f2[0].rows, (unsigned long)m.f2[0].cols);
+    { sk_fix g1row[SK_T_MAXD]; sk_fix gfrow[SK_T_MAXD];
+      if (sk_model_gain_row(&m, SK_GAIN_G1, 0, g1row)
+          && sk_model_gain_row(&m, SK_GAIN_GF, 0, gfrow))
+          printf("[sky] gains   g1[0][0]=%ld gf[0]=%ld\n", (long)g1row[0], (long)gfrow[0]);
+      else
+          printf("[sky] gains   UNREADABLE\n"); }
+
+    /* Prove the weights landed byte for byte.  The loader checksums the
+       weights while parsing the file; recomputing that checksum by reading
+       the store back proves the storage path is lossless.  The format is
+       therefore parsed in exactly one place: an earlier version of this
+       verification walked the file a second time and got the position of
+       the g2 gains wrong, which reported a false mismatch on a correct
+       loader. */
+    {
+        sk_u32 crc_back = sk_model_weights_crc(&m);
+
+        printf("[sky] weights crc  load %08lX  store %08lX  %s\n",
+               (unsigned long)m.weights_crc, (unsigned long)crc_back,
+               (crc_back == m.weights_crc) ? "MATCH" : "MISMATCH");
+        if (crc_back != m.weights_crc) {
+            sk_arena_done(&arena);
+            return 7;
+        }
+    }
+    /* One real matvec, so the loader is proven to produce usable numbers
+       and not just to have consumed the right byte count. */
+    {
+        sk_fix x[SK_T_MAXD];
+        sk_fix y[SK_T_MAXD];
+        int i;
+        int ok;
+        sk_fix peak;
+        int nz;
+
+        for (i = 0; i < m.D; i++)
+            x[i] = SK_FIX_ONE;
+        ok = sk_table_matvec(&m.wq[0], x, y);
+
+        peak = 0;
+        nz = 0;
+        for (i = 0; i < m.D; i++) {
+            sk_fix a = (y[i] < 0) ? -y[i] : y[i];
+            if (a > peak)
+                peak = a;
+            if (y[i] != 0)
+                nz++;
+        }
+        printf("[sky] matvec  %s, %d/%d non-zero, peak |y| = %ld.%03ld\n",
+               ok ? "ok" : "FAILED", nz, m.D,
+               (long)(peak >> 16),
+               /* three decimals, not five: (frac * 100000) overflows int32
+                  for any frac above ~21474, which printed 4.116 for a true
+                  4.78 and looked like a maths bug for a while. */
+               (long)(((peak & 0xFFFFL) * 1000L) >> 16));
+        if (!ok) {
+            sk_arena_done(&arena);
+            return 7;
+        }
+    }
+
+    sk_arena_done(&arena);
     return 0;
 }
 
@@ -427,6 +578,7 @@ int main(int argc, char **argv)
                    && (strcmp(a, "run") == 0 || strcmp(a, "train") == 0
                        || strcmp(a, "recover") == 0
                        || strcmp(a, "mem") == 0
+                       || strcmp(a, "model") == 0
                        || strcmp(a, "selftest") == 0)) {
             o.mode = a;
         } else if (o.files < 64) {
@@ -441,6 +593,8 @@ int main(int argc, char **argv)
         return cmd_selftest();
     if (strcmp(o.mode, "mem") == 0)
         return cmd_mem();
+    if (strcmp(o.mode, "model") == 0)
+        return cmd_model(&o);
     if (strcmp(o.mode, "recover") == 0)
         return cmd_recover(&o);
     if (strcmp(o.mode, "train") == 0) {

@@ -59,7 +59,7 @@ jobs:
       # being C89 rather than on the compiler enforcing it.
       - name: build (tcc)
         if: matrix.cc == 'tcc'
-        run: tcc -Wall -Isrc -o ${{ matrix.binary }} src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_selftest.c
+        run: tcc -Wall -Isrc -o ${{ matrix.binary }} src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_tensor.c src/sk_selftest.c
 
       - name: build (strict)
         if: matrix.cc != 'tcc'
@@ -69,7 +69,7 @@ jobs:
           ${{ matrix.cc }} -std=c89 -pedantic -Wall -Wextra -Werror -O2 \
             -Isrc -o ${{ matrix.binary }} \
             src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c \
-            src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_selftest.c
+            src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_tensor.c src/sk_selftest.c
 
       - name: selftest
         shell: bash
@@ -170,6 +170,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: build (the model checks below run the binary)
+        run: make all CFLAGS="-std=c89 -pedantic -Wall -Wextra -Werror -O2"
+
       # The invariants in docs/01-architecture.md are only real if they are
       # enforced.  This checker strips comments and string literals before
       # looking for banned tokens, so it does not fire on the comments that
@@ -211,6 +214,21 @@ jobs:
           python3 tools/hygiene.py
           echo "checker catches float, rand, math.h and // comments"
 
+      - name: the integer types are exactly 32 bits
+        run: |
+          set -e
+          # On Linux x86-64 `long` is 64 bits, so `unsigned long` is the
+          # wrong type for a 32-bit word. sk_types.h picks int or long from
+          # <limits.h> and proves the choice with a compile-time assertion;
+          # this step proves the assertion is actually reached and correct.
+          cc -std=c89 -pedantic -Wall -Wextra -Werror -Isrc -o build_sizes tests/sizes.c
+          ./build_sizes
+          ./build_sizes | grep -q 'sk_u32=4 sk_i32=4 sk_fix=4' || {
+            echo "::error::sk_u32 is not 32 bits on this platform"
+            exit 1
+          }
+          echo "32-bit types confirmed"
+
       - name: docs exist
         run: |
           set -e
@@ -229,6 +247,37 @@ jobs:
             exit 1
           }
           echo "logo is reproducible from the prime sequence"
+
+      - name: TNY2 model import
+        run: |
+          set -e
+          # The released TINY.BIN is the M2 baseline. Loading it must
+          # reproduce the same weight bytes and a dense matvec result.
+          OUT=$(./skynet model refs/Tiny-2.1-main/dos/TINY.BIN)
+          echo "$OUT"
+          case "$OUT" in
+            *"D=96 L=4 H=4 HID=256 HD=24"*) ;;
+            *) echo "::error::unexpected model shape"; exit 1 ;;
+          esac
+          case "$OUT" in
+            *"MATCH"*) ;;
+            *) echo "::error::weights do not round-trip through the store"; exit 1 ;;
+          esac
+          case "$OUT" in
+            *"96/96 non-zero"*) ;;
+            *) echo "::error::matvec produced a degenerate result"; exit 1 ;;
+          esac
+
+      - name: cross-check the matvec against a float reference
+        run: |
+          set -e
+          # Two implementations of the same wrong idea agree with each
+          # other, so the fixed-point matvec is compared against Python
+          # floats, not against itself.
+          python3 tools/check_matvec.py | tee /tmp/ref.txt
+          PEAK=$(grep 'peak as Q16.16' /tmp/ref.txt | awk '{print $NF}')
+          OUR=$(./skynet model refs/Tiny-2.1-main/dos/TINY.BIN | grep matvec | sed 's/.*peak |y| = //')
+          python3 tools/compare_peak.py "$PEAK" "$OUR"
 
   # --------------------------------------------------------------- dos
   # DOS is the real target, so it gets a real 16-bit compiler AND a real

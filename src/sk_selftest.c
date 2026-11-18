@@ -10,6 +10,7 @@
 #include <string.h>
 #include "sk_selftest.h"
 #include "sk_mem.h"
+#include "sk_tensor.h"
 #include "sk_math.h"
 #include "sk_arena.h"
 #include "sk_clock.h"
@@ -278,6 +279,10 @@ int sk_selftest_run(void)
     printf("vault...\n");
     fflush(stdout);
     sk_check("vault crash/recovery", sk_vault_selftest() == 1);
+
+    printf("tensor...\n");
+    fflush(stdout);
+    sk_check("IEEE-754 to Q16.16 conversion", sk_tensor_selftest() == 1);
 
     printf("------------------\n");
     printf("%d passed, %d failed\n", sk_pass, sk_fail);
