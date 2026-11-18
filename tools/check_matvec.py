@@ -10,11 +10,21 @@ the file format.
 Usage: check_matvec.py [model] [table] [row]
 """
 import struct
-import sys
+import os, sys
 
 VOCAB = 97
 CTX = 128
 
+
+def baseline():
+    """The released weight file: refs/ when the full tree is present,
+    otherwise the tracked fixture. Never a silent fallback to something else
+    - if neither exists this returns a path that does not open, and the
+    caller says so."""
+    full = os.path.join('refs', 'Tiny-2.1-main', 'dos', 'TINY.BIN')
+    if os.path.exists(full):
+        return full
+    return os.path.join('tests', 'fixtures', 'TINY.BIN')
 
 def read_tables(path):
     f = open(path, "rb")
@@ -53,7 +63,7 @@ def read_tables(path):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "refs/Tiny-2.1-main/dos/TINY.BIN"
+    path = sys.argv[1] if len(sys.argv) > 1 else baseline()
     name = sys.argv[2] if len(sys.argv) > 2 else "wq0"
     D, L, HID, tables = read_tables(path)
     scales, weights = tables[name]

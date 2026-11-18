@@ -14,13 +14,37 @@
 # many examples. It does not, and docs/06-training.md explains why.
 set -e
 cd "$(dirname "$0")/.."
-MODEL=refs/Tiny-2.1-main/dos/TINY.BIN
-
-if [ ! -f build/dataset.txt ]; then
-    python3 tools/build_dataset.py build/dataset.txt
+MODEL=${SKYNET_MODEL:-}
+if [ -z "$MODEL" ]; then
+    if [ -f refs/Tiny-2.1-main/dos/TINY.BIN ]; then
+        MODEL=refs/Tiny-2.1-main/dos/TINY.BIN
+    else
+        MODEL=tests/fixtures/TINY.BIN
+    fi
 fi
-head -1 build/dataset.txt > build/one.txt
-head -40 build/dataset.txt > build/tc_small.txt
+if [ ! -f "$MODEL" ]; then
+    echo "missing baseline: $MODEL" >&2
+    echo "tests/fixtures/TINY.BIN should be in the clone; refs/ is not" >&2
+    exit 2
+fi
+
+DATA=${SKYNET_DATASET:-}
+if [ -z "$DATA" ]; then
+    if [ -d refs/Tiny-2.1-main/training/facts ]; then
+        if [ ! -f build/dataset.txt ]; then
+            python3 tools/build_dataset.py build/dataset.txt
+        fi
+        DATA=build/dataset.txt
+    else
+        DATA=tests/fixtures/dataset.txt
+    fi
+fi
+if [ ! -f "$DATA" ]; then
+    echo "missing dataset: $DATA" >&2
+    exit 2
+fi
+head -1 "$DATA" > build/one.txt
+head -40 "$DATA" > build/tc_small.txt
 
 echo "== lr = 0 must not change anything"
 Z=$(./skynet train "$MODEL" build/tc_small.txt --epochs 3 --lr 0)

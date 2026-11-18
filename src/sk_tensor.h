@@ -150,6 +150,7 @@ sk_u32 sk_model_bytes(const sk_model *m);
 
 /* Read one gains row (D values) as Q16.16. */
 int sk_model_gain_row(sk_model *m, int which, int layer, sk_fix *out);
+int sk_model_gain_write(sk_model *m, int which, int layer, const sk_fix *in);
 
 /* Bytes needed for the weights of a network of this shape, before
    loading.  Lets the caller size the storage without parsing the file. */
@@ -174,6 +175,11 @@ int sk_table_scale_write(const sk_table *t, sk_u32 row, sk_fix v);
 /* y[i] = sum_j w[i][j] * x[j], WITHOUT the row scale.  The trainer needs
    the un-scaled dot product because dL/dscale is exactly dy times it. */
 int sk_table_matvec_noscale(const sk_table *t, const sk_fix *x, sk_fix *y);
+
+/* Both at once: y (scaled) and dot (un-scaled).  One pass instead of two,
+   which matters because the trainer calls this per position per layer. */
+int sk_table_matvec_dot(const sk_table *t, const sk_fix *x, sk_fix *y,
+                        sk_fix *dot);
 
 /* Look one row up as Q16.16 values (used for embeddings). */
 int sk_table_row(const sk_table *t, sk_u32 row, sk_fix *out);

@@ -107,7 +107,7 @@ SkyNet/
 ├── tools/              генератор логотипа
 ├── docs/               рассуждения — это часть результата
 ├── assets/             логотип и иконка
-└── refs/               материалы (Tiny-2.1, ZMath.cs, Babel.cs)
+└── tests/fixtures/     TINY.BIN — эталон, против которого всё сверяется
 ```
 
 ## Документация
@@ -215,7 +215,7 @@ answer 7 times 8 is 56.
 ## Лицензия
 
 Код — MIT. См. [LICENSE](LICENSE).
-Материалы в `refs/` сохраняют свои лицензии (см. `refs/Tiny-2.1-main/DATA_LICENSES.md`).
+Материалы в `refs/` сохраняют свои лицензии (см. `tests/fixtures/TINY.DATA_LICENSES.md`).
 
 ---
 

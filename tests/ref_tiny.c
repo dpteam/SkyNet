@@ -231,7 +231,7 @@ static void step(int tok, int p, float *score)
 int main(int argc, char **argv)
 {
     static float score[VOCAB];
-    const char *model = argc > 1 ? argv[1] : "refs/Tiny-2.1-main/dos/TINY.BIN";
+    const char *model = argc > 1 ? argv[1] : "tests/fixtures/TINY.BIN";
     const char *prompt = argc > 2 ? argv[2] : "hello";
     const char *mode = argc > 3 ? argv[3] : "scores";
     int i, p, n;

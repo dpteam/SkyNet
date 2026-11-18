@@ -62,7 +62,8 @@ echo "== 8. TNY2 model import"
 # same weight bytes (CRC) and the same matvec peak as an independent float
 # reference (tools/check_matvec.py), within the one-LSB-per-row error that
 # a Q16.16 scale inevitably introduces.
-OUT=$(./skynet model refs/Tiny-2.1-main/dos/TINY.BIN || true)
+BM=$( [ -f refs/Tiny-2.1-main/dos/TINY.BIN ] && echo refs/Tiny-2.1-main/dos/TINY.BIN || echo tests/fixtures/TINY.BIN )
+OUT=$(./skynet model "$BM" || true)
 echo "$OUT" | grep -E "loaded|weights crc|matvec" | sed 's/^/   /'
 case "$OUT" in
     *"D=96 L=4 H=4 HID=256 HD=24"*) echo "   shape ok" ;;

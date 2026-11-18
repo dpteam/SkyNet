@@ -1,15 +1,31 @@
 # ---- build output -----------------------------------------------------
 build/
+# Every scratch build directory, whatever it is called. Naming them one by
+# one is how compiler logs ended up committed: build_dos/ and build_dos16/
+# were not listed, and the *.o / *.exe rules below do not cover *.log or
+# *.err, so thirteen empty .log files and eight .err files from a Watcom
+# crash went into the repository.
+build_*/
 *.exe
+*.EXE
 *.o
 *.obj
+*.OBJ
 *.map
+*.MAP
 *.lst
+*.LST
 *.tds
+*.TDS
 *.ilk
 *.pdb
 *.exp
 *.lib
+*.LIB
+*.log
+*.LOG
+*.err
+*.ERR
 
 # the POSIX binary has no extension, so it needs naming explicitly
 /skynet
@@ -45,16 +61,23 @@ desktop.ini
 __pycache__/
 *.pyc
 
+# ---- reference material ----------------------------------------------
+# 41 MB of provenance: the released Tiny-2.1 tree, the PyTorch trainer, the
+# old attempts and the C# sources. Read once, quoted in the docs, not
+# something a clone should have to carry. The ONE artefact the checks need
+# is copied into tests/fixtures/ and is tracked there.
+refs/
+!tests/fixtures/
+!tests/fixtures/*.BIN
+!tests/fixtures/*.txt
+!tests/fixtures/*.md
+
 # ---- deliberately NOT ignored ----------------------------------------
-# refs/      - reference material, kept for provenance (see docs/00-index.md)
 # assets/    - logo and icon are part of the project identity
 # docs/      - the reasoning is the deliverable
+# tests/fixtures/TINY.BIN - the baseline every check measures against
 
-# refs/ ships reference binaries on purpose: TINY.EXE and TINY.BIN are the
-# baseline we must reproduce in M2, and the old builds are the provenance of
-# the earlier attempt.  The generic *.exe rule above must not eat them.
-!refs/**/*.exe
-!refs/**/*.EXE
-!refs/**/*.bin
-!refs/**/*.BIN
+# The fixture is a .BIN, and the build-output rule below would eat it, so
+# the exception above has to come first.
+!tests/fixtures/TINY.BIN
 

@@ -47,6 +47,22 @@ typedef struct {
     sk_fix    peak;
     sk_fix    hf[SK_T_MAXD];   /* final normed state of the last step */
     int       saturated;             /* any value hit the Q16.16 ceiling */
+
+    /* Optional trace of the last step, used only by the trainer.
+     *
+     * All NULL during inference: recording activations costs memory a
+     * 640 KB machine does not have. The trainer sets these pointers, gets
+     * the intermediates its backward pass needs, and the inference path is
+     * unchanged - which is why they live here and not in sk_model. */
+    sk_fix   *tr_hn2;      /* normed input to the last block's FF   D */
+    sk_fix   *tr_mid;      /* relu(f1 * hn2)                     HID */
+    sk_fix   *tr_dotf1;    /* f1 dot products                    HID */
+    sk_fix   *tr_dotf2;    /* f2 dot products                      D */
+    sk_fix   *tr_xff;      /* residual entering the last FF         D */
+    sk_fix    tr_inv2;     /* norm factor for that input              */
+    sk_fix    tr_xf[SK_T_MAXD];  /* residual before the final norm     */
+    sk_fix    tr_invf;     /* final norm factor                       */
+    int       tr_layer;    /* which layer to record, -1 = none        */
 } sk_ctx;
 
 /* Open the context.  `kv_storage` backs the cache when EMS is not used. */

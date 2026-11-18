@@ -664,6 +664,35 @@ int sk_table_matvec_noscale(const sk_table *t, const sk_fix *x, sk_fix *y)
     return 1;
 }
 
+int sk_table_matvec_dot(const sk_table *t, const sk_fix *x, sk_fix *y,
+                        sk_fix *dot)
+{
+    signed char w[SK_T_MAXHID];
+    sk_u32 i, j;
+    sk_fix scale;
+
+    if (t == SK_NULL || x == SK_NULL || y == SK_NULL || t->pool == SK_NULL)
+        return 0;
+
+    for (i = 0; i < t->rows; i++) {
+        sk_u32 hi, lo;
+
+        if (!sk_table_read_row(t, i, w))
+            return 0;
+        hi = 0;
+        lo = 0;
+        for (j = 0; j < t->cols; j++)
+            sk_acc_add(&hi, &lo,
+                       sk_fix_mul(sk_fix_from_int((sk_i32)w[j]), x[j]));
+        if (dot != SK_NULL)
+            dot[i] = sk_acc_result(hi, lo);
+        if (!sk_table_scale_read(t, i, &scale))
+            return 0;
+        y[i] = sk_acc_scale(hi, lo, scale);
+    }
+    return 1;
+}
+
 int sk_table_scale_write(const sk_table *t, sk_u32 row, sk_fix v)
 {
     sk_u8 b[4];
@@ -737,6 +766,43 @@ int sk_table_matvec(const sk_table *t, const sk_fix *x, sk_fix *y)
 /* ------------------------------------------------------------------ */
 /* selftest                                                           */
 /* ------------------------------------------------------------------ */
+
+int sk_model_gain_write(sk_model *m, int which, int layer, const sk_fix *in)
+{
+    unsigned char sb[4];
+    sk_u32 base, i, D;
+
+    if (m == SK_NULL || in == SK_NULL || !m->loaded)
+        return 0;
+    D = (sk_u32)m->D;
+
+    switch (which) {
+    case SK_GAIN_G1:
+        if (layer < 0 || layer >= m->L) return 0;
+        base = m->gain_base + (sk_u32)layer * D * 4UL;
+        break;
+    case SK_GAIN_G2:
+        if (layer < 0 || layer >= m->L) return 0;
+        base = m->gain_base + ((sk_u32)m->L * D + (sk_u32)layer * D) * 4UL;
+        break;
+    case SK_GAIN_GF:
+        base = m->gain_base + 2UL * (sk_u32)m->L * D * 4UL;
+        break;
+    default:
+        return 0;
+    }
+
+    for (i = 0; i < D; i++) {
+        sk_fix v = in[i];
+        sb[0] = (unsigned char)(v & 0xFFL);
+        sb[1] = (unsigned char)((v >> 8) & 0xFFL);
+        sb[2] = (unsigned char)((v >> 16) & 0xFFL);
+        sb[3] = (unsigned char)((v >> 24) & 0xFFL);
+        if (!sk_pool_write(&m->pool, base + i * 4UL, sb, 4))
+            return 0;
+    }
+    return 1;
+}
 
 sk_u32 sk_model_weights_crc(const sk_model *m)
 {

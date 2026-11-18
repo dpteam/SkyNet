@@ -7,7 +7,19 @@
 set -e
 
 cd "$(dirname "$0")/.."
-MODEL=refs/Tiny-2.1-main/dos/TINY.BIN
+MODEL=${SKYNET_MODEL:-}
+if [ -z "$MODEL" ]; then
+    if [ -f refs/Tiny-2.1-main/dos/TINY.BIN ]; then
+        MODEL=refs/Tiny-2.1-main/dos/TINY.BIN
+    else
+        MODEL=tests/fixtures/TINY.BIN
+    fi
+fi
+if [ ! -f "$MODEL" ]; then
+    echo "missing baseline: $MODEL" >&2
+    echo "tests/fixtures/TINY.BIN should be in the clone; refs/ is not" >&2
+    exit 2
+fi
 
 echo "== build"
 make all CFLAGS="-std=c89 -pedantic -Wall -Wextra -Werror -O2" >/dev/null

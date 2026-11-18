@@ -13,12 +13,22 @@ If this script and the C loader produce the same CRC, the format reading
 is right and the verifier is wrong.
 """
 import struct
-import sys
+import os, sys
 import zlib
 
 VOCAB = 97
 CTX = 128
 
+
+def baseline():
+    """The released weight file: refs/ when the full tree is present,
+    otherwise the tracked fixture. Never a silent fallback to something else
+    - if neither exists this returns a path that does not open, and the
+    caller says so."""
+    full = os.path.join('refs', 'Tiny-2.1-main', 'dos', 'TINY.BIN')
+    if os.path.exists(full):
+        return full
+    return os.path.join('tests', 'fixtures', 'TINY.BIN')
 
 def crc32c(data, crc=0):
     """CRC-32C (Castagnoli), the one the C code uses.
@@ -48,7 +58,7 @@ crc32c.table = None
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "refs/Tiny-2.1-main/dos/TINY.BIN"
+    path = sys.argv[1] if len(sys.argv) > 1 else baseline()
     f = open(path, "rb")
 
     magic = f.read(4)

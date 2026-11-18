@@ -106,7 +106,8 @@ void sk_ctx_reset(sk_ctx *c)
  * The epsilon is 1e-5 in the original; here it is one LSB of Q16.16
  * (1.5e-5), the closest representable value, doing the same job: keeping a
  * zero-variance vector from dividing by zero. */
-static void sk_norm(const sk_fix *x, const sk_fix *g, sk_fix *y, int n)
+static void sk_norm(const sk_fix *x, const sk_fix *g, sk_fix *y, int n,
+                    sk_fix *inv_out)
 {
     sk_u32 hi, lo;
     sk_fix mx, s, mean, inv, limit;
@@ -145,6 +146,8 @@ static void sk_norm(const sk_fix *x, const sk_fix *g, sk_fix *y, int n)
     for (i = shift; i > 0; i--)
         inv >>= 1;
 
+    if (inv_out != SK_NULL)
+        *inv_out = inv;
     for (i = 0; i < n; i++)
         y[i] = sk_fix_mul(sk_fix_mul(x[i], inv), g[i]);
 }
@@ -287,7 +290,7 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
         vsbase = ksbase + 4UL * (sk_u32)SK_T_CTX;
 
         /* ---- attention -------------------------------------------- */
-        sk_norm(bx, g1, bh, m->D);
+        sk_norm(bx, g1, bh, m->D, SK_NULL);
 
 
         if (!sk_table_matvec(&m->wk[l], bh, bt))
@@ -393,18 +396,36 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
         }
 
 
-        /* ---- feed forward ----------------------------------------- */
-        sk_norm(bx, g2, bh, m->D);
-        if (!sk_table_matvec(&m->f1[l], bh, bm))
-            return 0;
-        for (i = 0; i < m->HID; i++) {
-            if (bm[i] < 0)
-                bm[i] = 0;
+        /* ---- feed forward -----------------------------------------
+           The trainer asks for a trace of this block; during inference the
+           trace pointers are NULL and this costs one integer compare. */
+        {
+            int trace = (c->tr_layer == l);
+
+            if (trace && c->tr_xff != SK_NULL)
+                memcpy(c->tr_xff, bx, (size_t)m->D * sizeof(sk_fix));
+
+            sk_norm(bx, g2, bh, m->D, trace ? &c->tr_inv2 : SK_NULL);
+
+            if (trace && c->tr_hn2 != SK_NULL)
+                memcpy(c->tr_hn2, bh, (size_t)m->D * sizeof(sk_fix));
+
+            if (!sk_table_matvec_dot(&m->f1[l], bh, bm,
+                                     trace ? c->tr_dotf1 : SK_NULL))
+                return 0;
+            for (i = 0; i < m->HID; i++) {
+                if (bm[i] < 0)
+                    bm[i] = 0;
+            }
+            if (trace && c->tr_mid != SK_NULL)
+                memcpy(c->tr_mid, bm, (size_t)m->HID * sizeof(sk_fix));
+
+            if (!sk_table_matvec_dot(&m->f2[l], bm, bt,
+                                     trace ? c->tr_dotf2 : SK_NULL))
+                return 0;
+            for (i = 0; i < m->D; i++)
+                bx[i] += bt[i];
         }
-        if (!sk_table_matvec(&m->f2[l], bm, bt))
-            return 0;
-        for (i = 0; i < m->D; i++)
-            bx[i] += bt[i];
     }
 
     /* ---- output projection, weight-tied to the embedding ----------- */
@@ -413,7 +434,10 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
 
         if (!sk_model_gain_row(m, SK_GAIN_GF, 0, gf))
             return 0;
-        sk_norm(bx, gf, bh, m->D);
+        /* Two small buffers, always kept: the trainer needs the residual
+           entering the final norm and the norm factor to backprop through. */
+        memcpy(c->tr_xf, bx, (size_t)m->D * sizeof(sk_fix));
+        sk_norm(bx, gf, bh, m->D, &c->tr_invf);
         memcpy(c->hf, bh, (size_t)m->D * sizeof(sk_fix));
         if (!sk_table_matvec(&m->out, bh, scores))
             return 0;

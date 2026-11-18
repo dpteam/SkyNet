@@ -43,6 +43,20 @@ void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust);
 /* Zero the gradient accumulators without applying them. */
 void sk_train_zero_grads(sk_train *t);
 
+/* Identifies one trainable parameter for the checker. */
+#define SK_P_OUT 0     /* output projection row scale      */
+#define SK_P_GF  1     /* final gains, element             */
+#define SK_P_G2  2     /* last block g2 gains, element     */
+#define SK_P_F1  3     /* last block f1 row scale, row     */
+#define SK_P_F2  4     /* last block f2 row scale, row     */
+
+/* Mean gradient for one parameter, raw Q16.16. */
+sk_fix sk_train_grad_get(sk_train *t, int kind, int index);
+
+/* Read and write the parameter itself, for the finite difference. */
+int sk_train_param_get(sk_train *t, int kind, int index, sk_fix *out);
+int sk_train_param_set(sk_train *t, int kind, int index, sk_fix value);
+
 /* The accumulated mean gradient for one output row, raw Q16.16.
  * Not Q8.24: converting saturates above 128 and hides large gradients. */
 sk_i32 sk_train_grad_row(sk_train *t, int r);

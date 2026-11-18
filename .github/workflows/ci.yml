@@ -253,7 +253,7 @@ jobs:
           set -e
           # The released TINY.BIN is the M2 baseline. Loading it must
           # reproduce the same weight bytes and a dense matvec result.
-          OUT=$(./skynet model refs/Tiny-2.1-main/dos/TINY.BIN)
+          OUT=$(./skynet model tests/fixtures/TINY.BIN)
           echo "$OUT"
           case "$OUT" in
             *"D=96 L=4 H=4 HID=256 HD=24"*) ;;
@@ -276,7 +276,7 @@ jobs:
           # floats, not against itself.
           python3 tools/check_matvec.py | tee /tmp/ref.txt
           PEAK=$(grep 'peak as Q16.16' /tmp/ref.txt | awk '{print $NF}')
-          OUR=$(./skynet model refs/Tiny-2.1-main/dos/TINY.BIN | grep matvec | sed 's/.*peak |y| = //')
+          OUR=$(./skynet model tests/fixtures/TINY.BIN | grep matvec | sed 's/.*peak |y| = //')
           python3 tools/compare_peak.py "$PEAK" "$OUR"
 
       - name: the trainer gradient is correct
@@ -286,19 +286,35 @@ jobs:
           # would rise; if the scale were wrong it would diverge.
           sh tools/train_check.sh
 
+      # refs/ is not in git: 41 MB of provenance, ignored on purpose. The
+      # fixture dataset is forty of the same examples, so this check runs
+      # identically in a bare clone; when the full tree is present the
+      # generator wins and the check covers everything.
+      - name: dataset for the checks
+        run: |
+          set -e
+          if [ -d refs/Tiny-2.1-main/training/facts ]; then
+            python3 tools/build_dataset.py build/dataset.txt
+          else
+            mkdir -p build
+            cp tests/fixtures/dataset.txt build/dataset.txt
+          fi
+          wc -l build/dataset.txt
+
       - name: the gradient matches a numerical derivative
         run: |
           set -e
           # The strongest check available without a reference: nudge each
-          # output scale, measure how the loss moves, and compare against
-          # what the backward pass claims. This found two real bugs - a
-          # missing 1/n over the answer positions, and a saturation inside
-          # sk_fix_mul that reported a plausible 128.0 for a gradient of 283.
+          # parameter, measure how the loss moves, and compare against what
+          # the backward pass claims. This found four real bugs: a missing
+          # 1/n over the answer positions, a saturation inside sk_fix_mul
+          # that reported a plausible 128.0 for a gradient of 283, two
+          # formats in one file, and uninitialised accumulators.
           cc -O2 -Isrc -o build/gradcheck tests/gradcheck.c \
              src/sk_math.c src/sk_arena.c src/sk_clock.c src/sk_vault.c \
              src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_tensor.c \
              src/sk_forward.c src/sk_grad.c src/sk_train.c -lm
-          ./build/gradcheck refs/Tiny-2.1-main/dos/TINY.BIN build/dataset.txt
+          ./build/gradcheck tests/fixtures/TINY.BIN build/dataset.txt
 
       - name: the model matches the released implementation
         run: |
