@@ -40,6 +40,9 @@ typedef struct {
     sk_u32 log_every;
     sk_u32 arena_bytes;
     int    creativity;
+    int    layers;
+    int    hid;
+    int    bits;
     int    quiet;
     int    durable;
     int    seed_given;
@@ -170,10 +173,10 @@ static int cmd_predict(const sk_opts *o)
     }
     fclose(fp);
 
-    need = sk_model_size((sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8)),
+    need = sk_model_size_bits((sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8)),
                          (sk_u32)((sk_u32)hdr[6] | ((sk_u32)hdr[7] << 8)),
                          (sk_u32)((sk_u32)hdr[10] | ((sk_u32)hdr[11] << 8)),
-                         97UL, 128UL);
+                         97UL, 128UL, o->bits);
 
     /* The KV cache is sized by the model too: per layer, two int8 tables of
        CTX x D plus two arrays of CTX Q16.16 scales.  Ask for both up front -
@@ -226,7 +229,7 @@ static int cmd_predict(const sk_opts *o)
                (unsigned long)(need / 1024UL));
     }
 
-    if (!sk_model_load(&m, path, &m.pool, why, (sk_u32)sizeof(why))) {
+    if (!sk_model_load_shaped(&m, path, &m.pool, o->layers, o->hid, o->bits, why, (sk_u32)sizeof(why))) {
         printf("[sky] load failed: %s\n", why);
         sk_arena_done(&arena);
         return 6;
@@ -334,10 +337,10 @@ static int cmd_ask(const sk_opts *o)
     }
     fclose(fp);
 
-    need = sk_model_size((sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8)),
+    need = sk_model_size_bits((sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8)),
                          (sk_u32)((sk_u32)hdr[6] | ((sk_u32)hdr[7] << 8)),
                          (sk_u32)((sk_u32)hdr[10] | ((sk_u32)hdr[11] << 8)),
-                         97UL, 128UL);
+                         97UL, 128UL, o->bits);
     {
         sk_u32 D = (sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8));
         sk_u32 L = (sk_u32)((sk_u32)hdr[6] | ((sk_u32)hdr[7] << 8));
@@ -371,7 +374,7 @@ static int cmd_ask(const sk_opts *o)
         }
     }
 
-    if (!sk_model_load(&m, path, &m.pool, why, (sk_u32)sizeof(why))) {
+    if (!sk_model_load_shaped(&m, path, &m.pool, o->layers, o->hid, o->bits, why, (sk_u32)sizeof(why))) {
         printf("[sky] load failed: %s\n", why);
         sk_arena_done(&arena);
         return 6;
@@ -467,10 +470,10 @@ static int cmd_model(const sk_opts *o)
     }
     fclose(fp);
 
-    need = sk_model_size((sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8)),
+    need = sk_model_size_bits((sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8)),
                          (sk_u32)((sk_u32)hdr[6] | ((sk_u32)hdr[7] << 8)),
                          (sk_u32)((sk_u32)hdr[10] | ((sk_u32)hdr[11] << 8)),
-                         97UL, 128UL);
+                         97UL, 128UL, o->bits);
     printf("[sky] model needs %lu bytes of weight storage\n",
            (unsigned long)need);
 
@@ -505,7 +508,7 @@ static int cmd_model(const sk_opts *o)
                (unsigned long)(need / 1024UL));
     }
 
-    if (!sk_model_load(&m, path, &m.pool, why, (sk_u32)sizeof(why))) {
+    if (!sk_model_load_shaped(&m, path, &m.pool, o->layers, o->hid, o->bits, why, (sk_u32)sizeof(why))) {
         printf("[sky] load failed: %s\n", why);
         sk_arena_done(&arena);
         return 6;
@@ -843,6 +846,9 @@ int main(int argc, char **argv)
     o.log_every = 1024;
     o.durable = 0;
     o.creativity = 0;
+    o.layers = 0;
+    o.hid = 0;
+    o.bits = 8;
     o.arena_bytes = 8UL * 1024UL * 1024UL;
 
     for (i = 1; i < argc; i++) {
@@ -865,6 +871,12 @@ int main(int argc, char **argv)
             o.log_every = SK_U32(strtoul(argv[++i], SK_NULL, 10));
         } else if (strcmp(a, "--mem") == 0 && i + 1 < argc) {
             o.arena_bytes = SK_U32(strtoul(argv[++i], SK_NULL, 10));
+        } else if (strcmp(a, "--bits") == 0 && i + 1 < argc) {
+            o.bits = (int)strtol(argv[++i], SK_NULL, 10);
+        } else if (strcmp(a, "--hid") == 0 && i + 1 < argc) {
+            o.hid = (int)strtol(argv[++i], SK_NULL, 10);
+        } else if (strcmp(a, "--layers") == 0 && i + 1 < argc) {
+            o.layers = (int)strtol(argv[++i], SK_NULL, 10);
         } else if (strcmp(a, "--creativity") == 0 && i + 1 < argc) {
             o.creativity = (int)strtol(argv[++i], SK_NULL, 10);
         } else if (strcmp(a, "--durable") == 0) {

@@ -23,9 +23,12 @@ BIN = "skynet.exe" if os.name == "nt" else "./skynet"
 REF = os.path.join("build", "ref_tiny.exe" if os.name == "nt" else "ref_tiny")
 
 
-def ask(model, question):
+def ask(model, question, extra=None):
+    cmd = [BIN, "ask", model, question]
+    if extra:
+        cmd += extra
     try:
-        out = subprocess.run([BIN, "ask", model, question],
+        out = subprocess.run(cmd,
                              capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
         return "<timeout>"
@@ -47,6 +50,7 @@ def main():
         print("usage: ask_accuracy.py <model> <expected.txt>")
         return 2
     model, path = sys.argv[1], sys.argv[2]
+    extra = sys.argv[3:]
 
     rows = []
     for line in open(path, encoding="utf-8"):
@@ -59,7 +63,7 @@ def main():
     good = 0
     bad = []
     for q, want in rows:
-        got = ask(model, q)
+        got = ask(model, q, extra)
         ok = want in normalize(got)
         if ok:
             good += 1

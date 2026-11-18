@@ -25,7 +25,7 @@
 #define SK_T_VOCAB  97
 #define SK_T_CTX    128
 
-/* One weight table: rows x cols int8 values, one Q16.16 scale per row.
+/* One weight table: rows x cols values, one Q8.24 scale per row.
  *
  * Both the weights AND the scales live in the pool.  Keeping the scales
  * resident in the struct was the obvious design and it does not fit: with
@@ -35,15 +35,23 @@
  * limit no host compiler has, so only the DOS build could catch it.
  *
  * Layout inside the pool for a table at offset `base`:
- *   base + 0                    : rows * 4 bytes of Q16.16 scales
- *   base + rows*4 + r*cols      : row r, cols int8 weights
+ *   base + 0                    : rows * 4 bytes of Q8.24 scales
+ *   base + rows*4 + r*stride    : row r, `cols` values at `bits` per value
+ *
+ * `bits` is 8 or 4.  Four-bit weights halve the storage and are the one
+ * compression that degrades gradually on this model - unlike truncating
+ * layers or units, which falls off a cliff.
  */
 typedef struct {
     sk_pool *pool;        /* store holding scales and weights   */
     sk_u32   base;        /* byte offset of the scale array     */
     sk_u32   rows;
     sk_u32   cols;
+    int      bits;        /* 8 or 4                              */
 } sk_table;
+
+/* Bytes one row of `cols` values occupies at `bits` per value. */
+sk_u32 sk_table_stride(sk_u32 cols, int bits);
 
 /* A loaded network.  Layout follows TNY2 exactly. */
 typedef struct {
@@ -79,6 +87,13 @@ typedef struct {
     sk_pool pool;         /* the one store all weights share     */
     sk_u32  used;         /* bytes consumed inside it            */
     sk_u32  weights_crc;  /* CRC32C of every weight byte, in file order */
+
+    /* How many layers are actually used.  Loading can stop early, which is
+       how the quality-versus-size curve is measured: a truncated model is
+       a real model, just shallower. */
+    int     layers_used;
+    int     bits;         /* 8 or 4 bits per weight              */
+
     int     loaded;
 } sk_model;
 
@@ -88,6 +103,32 @@ typedef struct {
    Returns 1 on success, and on failure fills `why` with a short reason. */
 int sk_model_load(sk_model *m, const char *path, sk_pool *pool,
                   char *why, sk_u32 whylen);
+
+/* Load only the first `layers` layers of the file.
+ *
+ * This is how the quality-versus-size curve is measured without training
+ * anything: a shallower network is a valid network, it just has fewer
+ * transformer blocks. The remaining layers are still read from the file -
+ * they have to be skipped, not ignored - so the parse stays honest about
+ * the format. Pass 0 for "all layers".
+ *
+ * The point is to answer "what do I lose if I only have N kilobytes"
+ * with a measurement instead of an opinion. */
+int sk_model_load_truncated(sk_model *m, const char *path, sk_pool *pool,
+                            int layers, char *why, sk_u32 whylen);
+
+/* Same, but also cut the feed-forward width to `hid` units.
+ *
+ * Truncating layers turned out to be a cliff, not a slope: three of four
+ * blocks give 5.7% accuracy and four give 100%. The feed-forward width is
+ * the other dimension that can shrink, and it is continuous, so it is the
+ * one worth measuring. f1 loses its last rows and f2 its last columns,
+ * which is exactly the sub-network that keeps those units. */
+int sk_model_load_shaped(sk_model *m, const char *path, sk_pool *pool,
+                         int layers, int hid, int bits, char *why, sk_u32 whylen);
+
+/* Bytes of weight storage this model actually occupies. */
+sk_u32 sk_model_bytes(const sk_model *m);
 
 #define SK_GAIN_G1 0
 #define SK_GAIN_G2 1
@@ -100,6 +141,8 @@ int sk_model_gain_row(sk_model *m, int which, int layer, sk_fix *out);
    loading.  Lets the caller size the storage without parsing the file. */
 sk_u32 sk_model_size(sk_u32 D, sk_u32 L, sk_u32 HID,
                      sk_u32 vocab, sk_u32 ctx);
+sk_u32 sk_model_size_bits(sk_u32 D, sk_u32 L, sk_u32 HID,
+                          sk_u32 vocab, sk_u32 ctx, int bits);
 
 /* y[i] = scale[row i] * sum_j w[i][j] * x[j], accumulated in Q16.16.
    This is the hot loop of the whole model, so it accumulates in 32 bits
