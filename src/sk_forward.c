@@ -75,6 +75,17 @@ void sk_ctx_close(sk_ctx *c)
     c->pos = 0;
 }
 
+int sk_ctx_hidden(sk_ctx *c, sk_fix *out)
+{
+    int i;
+
+    if (c == SK_NULL || out == SK_NULL || c->m == SK_NULL)
+        return 0;
+    for (i = 0; i < c->m->D; i++)
+        out[i] = c->hf[i];
+    return 1;
+}
+
 void sk_ctx_reset(sk_ctx *c)
 {
     if (c != SK_NULL)
@@ -403,6 +414,7 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
         if (!sk_model_gain_row(m, SK_GAIN_GF, 0, gf))
             return 0;
         sk_norm(bx, gf, bh, m->D);
+        memcpy(c->hf, bh, (size_t)m->D * sizeof(sk_fix));
         if (!sk_table_matvec(&m->emb, bh, scores))
             return 0;
     }

@@ -549,6 +549,81 @@ sk_fix sk_scale_fix(sk_fix v, sk_fix scale24)
     return sk_acc_scale(h, (sk_u32)v, scale24);
 }
 
+sk_fix sk_grad_step(sk_fix scale24, sk_fix grad_stored, sk_fix lr)
+{
+    sk_fix delta;
+
+    if (lr == 0 || grad_stored == 0)
+        return scale24;
+
+    /* Clamp the step so one bad gradient cannot destroy a scale.  Without
+       this, a single saturated gradient moves a row scale by more than the
+       scale itself and the row goes dead or explodes, and the model never
+       recovers - the classic divergence that makes people give up on
+       fixed-point training. */
+    delta = sk_fix_mul(lr, grad_stored);
+    if (delta > (SK_FIX_ONE / 8))
+        delta = SK_FIX_ONE / 8;
+    if (delta < -(SK_FIX_ONE / 8))
+        delta = -(SK_FIX_ONE / 8);
+
+    scale24 -= delta;
+    if (scale24 < 0)
+        scale24 = 0;                    /* a negative scale flips a whole row */
+    return scale24;
+}
+
+/* ------------------------------------------------------------------ */
+/* natural log                                                        */
+/* ------------------------------------------------------------------ */
+
+sk_fix sk_log_fix(sk_fix x)
+{
+    const sk_consts *k;
+    int e;
+    sk_fix t, sum;
+    int i;
+
+    k = sk_consts_get();
+    if (x <= 0)
+        return SK_FIX_MIN;
+
+    /* Normalise into [1, 2) by shifting, counting the exponent. */
+    e = 0;
+    while (x >= 2L * SK_FIX_ONE) {
+        x >>= 1;
+        e++;
+    }
+    while (x < SK_FIX_ONE) {
+        x <<= 1;
+        e--;
+    }
+
+    /* ln(m) for m in [1,2) by the atanh series:
+       ln(m) = 2 * atanh((m-1)/(m+1)) */
+    t = sk_fix_div(x - SK_FIX_ONE, x + SK_FIX_ONE);
+    sum = t;
+    {
+        sk_fix t2 = sk_fix_mul(t, t);
+        sk_fix p = t;
+        int sign = -1;
+
+        for (i = 1; i < 20; i++) {
+            p = sk_fix_mul(p, t2);
+            if (p == 0)
+                break;
+            if (sign < 0)
+                sum -= sk_fix_div(p, sk_fix_from_int(2 * i + 1));
+            else
+                sum += sk_fix_div(p, sk_fix_from_int(2 * i + 1));
+            sign = -sign;
+        }
+    }
+    sum = sk_fix_mul(sum, sk_fix_from_int(2));
+
+    return sum + sk_fix_mul(k->ln2, sk_fix_from_int(e));
+}
+
 /* ------------------------------------------------------------------ */
 /* IEEE-754 binary32 -> Q16.16                                        */
 /* ------------------------------------------------------------------ */

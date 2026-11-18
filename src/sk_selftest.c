@@ -12,6 +12,7 @@
 #include "sk_mem.h"
 #include "sk_tensor.h"
 #include "sk_forward.h"
+#include "sk_grad.h"
 #include "sk_math.h"
 #include "sk_arena.h"
 #include "sk_clock.h"
@@ -284,6 +285,10 @@ int sk_selftest_run(void)
     printf("tensor...\n");
     fflush(stdout);
     sk_check("IEEE-754 to Q16.16 conversion", sk_tensor_selftest() == 1);
+
+    printf("grad...\n");
+    fflush(stdout);
+    sk_check("Q8.24 gradient arithmetic", sk_grad_selftest() == 1);
 
     printf("forward...\n");
     fflush(stdout);

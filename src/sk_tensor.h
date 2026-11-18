@@ -150,6 +150,17 @@ sk_u32 sk_model_size_bits(sk_u32 D, sk_u32 L, sk_u32 HID,
    error at one LSB per output instead of one per product. */
 int sk_table_matvec(const sk_table *t, const sk_fix *x, sk_fix *y);
 
+/* Read a row as raw int8 values, whatever the stored width. */
+int sk_table_read_row(const sk_table *t, sk_u32 row, signed char *out);
+
+/* Read and write one row scale (Q8.24). */
+int sk_table_scale_read(const sk_table *t, sk_u32 row, sk_fix *out);
+int sk_table_scale_write(const sk_table *t, sk_u32 row, sk_fix v);
+
+/* y[i] = sum_j w[i][j] * x[j], WITHOUT the row scale.  The trainer needs
+   the un-scaled dot product because dL/dscale is exactly dy times it. */
+int sk_table_matvec_noscale(const sk_table *t, const sk_fix *x, sk_fix *y);
+
 /* Look one row up as Q16.16 values (used for embeddings). */
 int sk_table_row(const sk_table *t, sk_u32 row, sk_fix *out);
 

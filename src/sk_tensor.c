@@ -235,7 +235,7 @@ static int sk_load_table(sk_model *m, FILE *fp, sk_table *t,
 }
 
 /* Read the scale of one row. */
-static int sk_table_scale(const sk_table *t, sk_u32 row, sk_fix *out)
+int sk_table_scale_read(const sk_table *t, sk_u32 row, sk_fix *out)
 {
     unsigned char sb[4];
 
@@ -543,7 +543,7 @@ int sk_model_load_shaped(sk_model *m, const char *path, sk_pool *pool,
 
 /* Read one row and expand it to int8 values, whatever the stored width.
    Keeps the 4-bit unpacking in one place instead of in every consumer. */
-static int sk_read_row(const sk_table *t, sk_u32 row, signed char *out)
+int sk_table_read_row(const sk_table *t, sk_u32 row, signed char *out)
 {
     unsigned char packed[(SK_T_MAXHID + 1) / 2];
     unsigned char bytes[SK_T_MAXHID];
@@ -576,6 +576,41 @@ static int sk_read_row(const sk_table *t, sk_u32 row, signed char *out)
     return 1;
 }
 
+int sk_table_matvec_noscale(const sk_table *t, const sk_fix *x, sk_fix *y)
+{
+    signed char w[SK_T_MAXHID];
+    sk_u32 i, j;
+
+    if (t == SK_NULL || x == SK_NULL || y == SK_NULL)
+        return 0;
+    for (i = 0; i < t->rows; i++) {
+        sk_u32 hi, lo;
+
+        if (!sk_table_read_row(t, i, w))
+            return 0;
+        hi = 0;
+        lo = 0;
+        for (j = 0; j < t->cols; j++)
+            sk_acc_add(&hi, &lo,
+                       sk_fix_mul(sk_fix_from_int((sk_i32)w[j]), x[j]));
+        y[i] = sk_acc_result(hi, lo);
+    }
+    return 1;
+}
+
+int sk_table_scale_write(const sk_table *t, sk_u32 row, sk_fix v)
+{
+    sk_u8 b[4];
+
+    if (t == SK_NULL || t->pool == SK_NULL || row >= t->rows)
+        return 0;
+    b[0] = (sk_u8)(v & 0xFFL);
+    b[1] = (sk_u8)((v >> 8) & 0xFFL);
+    b[2] = (sk_u8)((v >> 16) & 0xFFL);
+    b[3] = (sk_u8)((v >> 24) & 0xFFL);
+    return sk_pool_write(t->pool, t->base + row * 4UL, b, 4);
+}
+
 int sk_table_row(const sk_table *t, sk_u32 row, sk_fix *out)
 {
     signed char w[SK_T_MAXHID];
@@ -586,9 +621,9 @@ int sk_table_row(const sk_table *t, sk_u32 row, sk_fix *out)
         return 0;
     if (row >= t->rows)
         return 0;
-    if (!sk_table_scale(t, row, &s))
+    if (!sk_table_scale_read(t, row, &s))
         return 0;
-    if (!sk_read_row(t, row, w))
+    if (!sk_table_read_row(t, row, w))
         return 0;
 
     for (j = 0; j < t->cols; j++)
@@ -610,7 +645,7 @@ int sk_table_matvec(const sk_table *t, const sk_fix *x, sk_fix *y)
     for (i = 0; i < t->rows; i++) {
         sk_u32 hi, lo;
 
-        if (!sk_read_row(t, i, w))
+        if (!sk_table_read_row(t, i, w))
             return 0;
 
         hi = 0;
@@ -626,7 +661,7 @@ int sk_table_matvec(const sk_table *t, const sk_fix *x, sk_fix *y)
             sk_acc_add(&hi, &lo, sk_fix_mul(sk_fix_from_int(v), x[j]));
         }
 
-        if (!sk_table_scale(t, i, &scale))
+        if (!sk_table_scale_read(t, i, &scale))
             return 0;
         y[i] = sk_acc_scale(hi, lo, scale);
     }
@@ -675,7 +710,7 @@ sk_u32 sk_model_weights_crc(const sk_model *m)
                 unsigned char flat[SK_T_MAXHID];
                 sk_u32 j;
 
-                if (!sk_read_row(t, r, w))
+                if (!sk_table_read_row(t, r, w))
                     return 0;
                 /* Flatten to bytes so a 4-bit table checksums the same way
                    it was checksummed at load time. */
@@ -772,7 +807,7 @@ int sk_tensor_selftest(void)
         if (!sk_pool_write(&pool, 0, packed, 4))
             return 0;
 
-        if (!sk_read_row(&t, 0, w8)) {
+        if (!sk_table_read_row(&t, 0, w8)) {
             printf("  FAIL: 4-bit row read\n");
             return 0;
         }

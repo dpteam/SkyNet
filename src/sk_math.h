@@ -87,6 +87,13 @@ sk_fix sk_acc_scale(sk_u32 hi, sk_u32 lo, sk_fix scale);
    one - the same trap that made sk_acc_scale wrong for half its inputs. */
 sk_fix sk_scale_fix(sk_fix v, sk_fix scale24);
 
+/* Natural logarithm in Q16.16, for the training loss.
+ *
+ * ln(x) = ln(2) * log2(x), and log2 of a Q16.16 value is found from its
+ * integer part and the leading bits of the fraction. Accuracy of about
+ * 1e-4 is plenty: the loss is a diagnostic, not a gradient. */
+sk_fix sk_log_fix(sk_fix x);
+
 /* ---- IEEE-754 binary32 -> Q16.16 ---------------------------------------
    Model files store their row scales as 4-byte floats, and the core has no
    floating point at all (invariant I1).  So the bit pattern is converted
@@ -118,5 +125,24 @@ sk_i32 sk_f32_to_q(sk_u32 bits, int frac_bits);
 
 /* Fractional bits used for the weight-table scales. */
 #define SK_SCALE_BITS 24
+
+/* ---- gradient storage ------------------------------------------------
+   A training step for a row scale is around 1e-6, which is below one LSB
+   of Q16.16 (1.5e-5): the update would round to zero and the model would
+   never learn. Gradients are therefore stored multiplied by
+   SK_GRAD_SCALE, which moves the useful range up by eight bits and makes
+   a Q16.16 word behave like Q8.24 for this purpose.
+
+   The arithmetic works out cleanly: with the scale in Q8.24, a gradient
+   stored as true*256 in Q16.16, and a learning rate in Q16.16,
+
+     delta(Q8.24) = lr * grad_stored >> 16
+
+   i.e. one plain fixed-point multiply, because the two factors of 2^8 and
+   2^8 cancel exactly. */
+#define SK_GRAD_SCALE 256
+
+/* scale -= sk_fix_mul(lr, grad) with the conventions above. */
+sk_fix sk_grad_step(sk_fix scale24, sk_fix grad_stored, sk_fix lr);
 
 #endif /* SK_MATH_H */

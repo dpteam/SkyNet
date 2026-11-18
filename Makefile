@@ -11,7 +11,7 @@ CFLAGS  ?= -std=c89 -pedantic -Wall -Wextra -O2
 LDFLAGS ?=
 
 SRC = src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c \
-      src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_tensor.c src/sk_forward.c src/sk_selftest.c
+      src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_tensor.c src/sk_forward.c src/sk_grad.c src/sk_train.c src/sk_selftest.c
 
 OBJ = $(SRC:.c=.o)
 

@@ -45,6 +45,7 @@ typedef struct {
        32768, so this is the number that says whether the fixed-point
        representation is still holding. It is reported, not guessed at. */
     sk_fix    peak;
+    sk_fix    hf[SK_T_MAXD];   /* final normed state of the last step */
     int       saturated;             /* any value hit the Q16.16 ceiling */
 } sk_ctx;
 
@@ -56,6 +57,11 @@ void sk_ctx_close(sk_ctx *c);
    letter of the vocabulary.  `scores` must hold SK_T_VOCAB values.
    Advances c->pos. */
 int  sk_forward_step(sk_ctx *c, int tok, sk_fix *scores);
+
+/* The final normed hidden state produced by the last sk_forward_step.
+   The trainer needs it to compute the output-projection gradient, and
+   reconstructing it outside would mean duplicating the forward pass. */
+int sk_ctx_hidden(sk_ctx *c, sk_fix *out);
 
 /* Reset the context so a new sequence can start at position 0. */
 void sk_ctx_reset(sk_ctx *c);

@@ -59,7 +59,7 @@ jobs:
       # being C89 rather than on the compiler enforcing it.
       - name: build (tcc)
         if: matrix.cc == 'tcc'
-        run: tcc -Wall -Isrc -o ${{ matrix.binary }} src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_tensor.c src/sk_forward.c src/sk_selftest.c
+        run: tcc -Wall -Isrc -o ${{ matrix.binary }} src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_tensor.c src/sk_forward.c src/sk_grad.c src/sk_train.c src/sk_selftest.c
 
       - name: build (strict)
         if: matrix.cc != 'tcc'
@@ -69,7 +69,7 @@ jobs:
           ${{ matrix.cc }} -std=c89 -pedantic -Wall -Wextra -Werror -O2 \
             -Isrc -o ${{ matrix.binary }} \
             src/main.c src/sk_math.c src/sk_arena.c src/sk_clock.c \
-            src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_tensor.c src/sk_forward.c src/sk_selftest.c
+            src/sk_vault.c src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_tensor.c src/sk_forward.c src/sk_grad.c src/sk_train.c src/sk_selftest.c
 
       - name: selftest
         shell: bash
@@ -278,6 +278,13 @@ jobs:
           PEAK=$(grep 'peak as Q16.16' /tmp/ref.txt | awk '{print $NF}')
           OUR=$(./skynet model refs/Tiny-2.1-main/dos/TINY.BIN | grep matvec | sed 's/.*peak |y| = //')
           python3 tools/compare_peak.py "$PEAK" "$OUR"
+
+      - name: the trainer gradient is correct
+        run: |
+          set -e
+          # Loss must fall on a single example. If the sign were wrong it
+          # would rise; if the scale were wrong it would diverge.
+          sh tools/train_check.sh
 
       - name: the model matches the released implementation
         run: |

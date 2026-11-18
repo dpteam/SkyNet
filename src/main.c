@@ -22,6 +22,7 @@
 #include "sk_mem.h"
 #include "sk_tensor.h"
 #include "sk_forward.h"
+#include "sk_train.h"
 #include "sk_selftest.h"
 
 #define SK_VERSION "0.1.0-m0"
@@ -43,6 +44,8 @@ typedef struct {
     int    layers;
     int    hid;
     int    bits;
+    int    epochs;
+    sk_i32 lr;
     int    quiet;
     int    durable;
     int    seed_given;
@@ -416,6 +419,181 @@ static int cmd_ask(const sk_opts *o)
     return 0;
 }
 
+/* Train the output projection on a dataset of "question|answer" lines.
+ *
+ * Reports the loss before and after, because a trainer that cannot show its
+ * own loss going down is a trainer nobody should trust. */
+static int cmd_train(const sk_opts *o)
+{
+    sk_model m;
+    sk_train tr;
+    sk_arena arena;
+    void *weights;
+    void *tstore;
+    sk_u32 need, tneed, got;
+    char why[64];
+    const char *path;
+    const char *data;
+    FILE *fp;
+    unsigned char hdr[12];
+    int epoch, i;
+    sk_fix loss_first = 0, loss_last = 0;
+
+    setvbuf(stdout, SK_NULL, _IONBF, 0);
+    sk_math_init();
+
+    path = (o->files > 0) ? o->filev[0] : o->out;
+    data = (o->files > 1) ? o->filev[1] : "build/dataset.txt";
+
+    fp = fopen(path, "rb");
+    if (fp == SK_NULL) {
+        printf("[sky] cannot open model '%s'\n", path);
+        return 6;
+    }
+    if (fread(hdr, 1, 12, fp) != 12 || memcmp(hdr, "TNY2", 4) != 0) {
+        fclose(fp);
+        printf("[sky] '%s' is not a TNY2 model\n", path);
+        return 6;
+    }
+    fclose(fp);
+
+    need = sk_model_size((sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8)),
+                         (sk_u32)((sk_u32)hdr[6] | ((sk_u32)hdr[7] << 8)),
+                         (sk_u32)((sk_u32)hdr[10] | ((sk_u32)hdr[11] << 8)),
+                         97UL, 128UL);
+
+    got = sk_arena_init_best(&arena, need + (16UL * 1024UL * 1024UL),
+                             need + 1024UL, SK_MEM_OS);
+    if (got == 0) {
+        printf("[sky] cannot get %lu bytes\n", (unsigned long)need);
+        return 3;
+    }
+    weights = sk_arena_alloc(&arena, need);
+    if (weights == SK_NULL || !sk_pool_open_from(&m.pool, need, weights)) {
+        printf("[sky] cannot allocate the weight store\n");
+        sk_arena_done(&arena);
+        return 3;
+    }
+    if (!sk_model_load(&m, path, &m.pool, why, (sk_u32)sizeof(why))) {
+        printf("[sky] load failed: %s\n", why);
+        sk_arena_done(&arena);
+        return 6;
+    }
+
+    tneed = sk_train_bytes(&m);
+    tstore = sk_arena_alloc(&arena, tneed);
+    if (tstore == SK_NULL || !sk_train_open(&tr, &m, tstore, tneed)) {
+        printf("[sky] cannot open the trainer (%lu bytes)\n",
+               (unsigned long)tneed);
+        sk_arena_done(&arena);
+        return 3;
+    }
+
+    printf("[sky] training %s on %s, lr=%ld/16777216, epochs=%d\n",
+           path, data, (long)o->lr, o->epochs);
+
+    for (epoch = 0; epoch < o->epochs; epoch++) {
+        FILE *df = fopen(data, "r");
+        int count = 0;
+        sk_i32 sum = 0;
+
+        if (df == SK_NULL) {
+            printf("[sky] cannot open dataset '%s'\n", data);
+            sk_train_close(&tr);
+            sk_arena_done(&arena);
+            return 6;
+        }
+
+        while (!feof(df)) {
+            char line[256];
+            char q[128], a[128];
+            int toks[SK_TRAIN_MAXT];
+            int ntok = 0, qlen, alen, k, sep;
+            sk_fix loss;
+
+            if (fgets(line, (int)sizeof(line), df) == SK_NULL)
+                break;
+            sep = -1;
+            for (k = 0; line[k] != '\0'; k++) {
+                if (line[k] == '|') { sep = k; break; }
+            }
+            if (sep < 0)
+                continue;
+            strcpy(q, "");
+            strcpy(a, "");
+            for (k = 0; k < sep && k < 127; k++)
+                q[k] = line[k];
+            q[k] = '\0';
+            {
+                int j = 0;
+                for (k = sep + 1; line[k] != '\0' && line[k] != '\n'
+                     && line[k] != '\r' && j < 127; k++)
+                    a[j++] = line[k];
+                a[j] = '\0';
+            }
+            qlen = (int)strlen(q);
+            alen = (int)strlen(a);
+            if (qlen < 1 || alen < 1)
+                continue;
+            if (qlen + alen + 2 > SK_TRAIN_MAXT)
+                continue;
+
+            /* tokens: question, then newline (1), then answer, then newline */
+            for (k = 0; k < qlen; k++) {
+                int tk = (unsigned char)q[k] - 30;
+                toks[ntok++] = (tk < 2) ? 2 : ((tk >= SK_T_VOCAB) ? SK_T_VOCAB - 1 : tk);
+            }
+            toks[ntok++] = 1;
+            for (k = 0; k < alen; k++) {
+                int tk = (unsigned char)a[k] - 30;
+                toks[ntok++] = (tk < 2) ? 2 : ((tk >= SK_T_VOCAB) ? SK_T_VOCAB - 1 : tk);
+            }
+            toks[ntok++] = 1;
+
+            if (ntok > SK_TRAIN_MAXT || ntok < 3)
+                continue;
+
+            loss = sk_train_sequence(&tr, toks, ntok, qlen + 1);
+            if (loss == 0)
+                continue;
+            sk_train_grads(&tr, toks, ntok, qlen + 1);
+            sk_train_update(&tr, o->lr);
+
+            if (count == 0 && epoch == 0)
+                loss_first = loss;
+            loss_last = loss;
+            sum += loss;
+            count++;
+
+            if (o->max_primes != 0 && count >= (int)o->max_primes)
+                break;
+        }
+        fclose(df);
+
+        if (count == 0) {
+            printf("[sky] dataset '%s' produced no usable examples\n", data);
+            break;
+        }
+        printf("[sky] epoch %d: %d examples, mean loss %ld.%04ld\n",
+               epoch + 1, count,
+               (long)((sum / count) >> 16),
+               (long)((((sum / count) & 0xFFFFL) * 10000L) >> 16));
+        (void)i;
+    }
+
+    if (loss_first != 0 && loss_last != 0) {
+        printf("[sky] first example loss %ld.%04ld -> last %ld.%04ld\n",
+               (long)(loss_first >> 16),
+               (long)(((loss_first & 0xFFFFL) * 10000L) >> 16),
+               (long)(loss_last >> 16),
+               (long)(((loss_last & 0xFFFFL) * 10000L) >> 16));
+    }
+
+    sk_train_close(&tr);
+    sk_arena_done(&arena);
+    return 0;
+}
+
 static int cmd_mem(void)
 {
     sk_meminfo mi;
@@ -776,7 +954,7 @@ static int cmd_run(const sk_opts *o)
 /* Ingest mode.  This is the seed of M4: the same walk will feed the
    trainer, and the same CRC is what makes "did this file already go in?"
    answerable without keeping the file. */
-static int cmd_train(const sk_opts *o)
+static int cmd_ingest(const sk_opts *o)
 {
     int i;
     unsigned long total;
@@ -849,6 +1027,8 @@ int main(int argc, char **argv)
     o.layers = 0;
     o.hid = 0;
     o.bits = 8;
+    o.epochs = 1;
+    o.lr = 16777;   /* 0.001 in Q8.24 */
     o.arena_bytes = 8UL * 1024UL * 1024UL;
 
     for (i = 1; i < argc; i++) {
@@ -871,6 +1051,10 @@ int main(int argc, char **argv)
             o.log_every = SK_U32(strtoul(argv[++i], SK_NULL, 10));
         } else if (strcmp(a, "--mem") == 0 && i + 1 < argc) {
             o.arena_bytes = SK_U32(strtoul(argv[++i], SK_NULL, 10));
+        } else if (strcmp(a, "--epochs") == 0 && i + 1 < argc) {
+            o.epochs = (int)strtol(argv[++i], SK_NULL, 10);
+        } else if (strcmp(a, "--lr") == 0 && i + 1 < argc) {
+            o.lr = (sk_fix)strtol(argv[++i], SK_NULL, 10);
         } else if (strcmp(a, "--bits") == 0 && i + 1 < argc) {
             o.bits = (int)strtol(argv[++i], SK_NULL, 10);
         } else if (strcmp(a, "--hid") == 0 && i + 1 < argc) {
@@ -917,13 +1101,10 @@ int main(int argc, char **argv)
         return cmd_ask(&o);
     if (strcmp(o.mode, "recover") == 0)
         return cmd_recover(&o);
-    if (strcmp(o.mode, "train") == 0) {
-        if (o.files == 0) {
-            printf("[sky] train needs at least one file\n");
-            return 2;
-        }
+    if (strcmp(o.mode, "train") == 0)
         return cmd_train(&o);
-    }
+    if (strcmp(o.mode, "ingest") == 0)
+        return cmd_ingest(&o);
     if (strcmp(o.mode, "run") != 0) {
         printf("[sky] unknown mode %s\n", o.mode);
         return 2;
