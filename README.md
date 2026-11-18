@@ -119,6 +119,7 @@ SkyNet/
 | [docs/02-ci.md](docs/02-ci.md) | что CI ловит и какие баги уже нашёл |
 | [docs/03-memory.md](docs/03-memory.md) | EMS и как DOS перестаёт быть 64-килобайтным |
 | [docs/04-model.md](docs/04-model.md) | загрузка TINY.BIN: float без float, 38-битная арифметика |
+| [docs/05-compression.md](docs/05-compression.md) | измеренная кривая сжатия: почему усечение не работает |
 | [docs/10-self-training.md](docs/10-self-training.md) | самообучение на ФС: 6 способов убить систему и 6 инвариантов |
 | [docs/11-babel.md](docs/11-babel.md) | Вавилонская библиотека: почему данных всегда хватает |
 | [docs/20-ideas.md](docs/20-ideas.md) | бэклог идей с привязкой к рискам |
@@ -135,6 +136,7 @@ SkyNet/
 | **TINY.BIN на DOS** | **384 КБ в 24 EMS-страницах, CRC MATCH** | `skynet model TINY.BIN` |
 | **Forward pass на DOS** | **побитово равен x86_64** | `skynet predict` в DOSBox |
 | **Ответы** | **35/35 верных, 36/38 побитово как оригинал** | `tools/ask_accuracy.py` |
+| **Сжатие** | **4-бит: 205 КБ при 51.4%** | `tools/compression_curve.py` |
 | Компиляторы | gcc, clang, tcc, OpenWatcom (16-бит) | 0 предупреждений при `-Wall -Wextra -pedantic` |
 | Цена fsync | **85 мс** против **0.1 мс** работы | `tests/bench_io.c` |
 
