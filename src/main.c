@@ -39,6 +39,7 @@ typedef struct {
     sk_u32 ckpt_every;
     sk_u32 log_every;
     sk_u32 arena_bytes;
+    int    creativity;
     int    quiet;
     int    durable;
     int    seed_given;
@@ -60,6 +61,7 @@ static void sk_usage(void)
     printf("  mem        report what memory this machine actually has\n");
     printf("  model FILE load a TNY2 model and report what it contains\n");
     printf("  predict FILE TEXT  run the forward pass and print the scores\n");
+    printf("  ask FILE QUESTION  generate an answer (default creativity 0)\n");
     printf("  selftest   check every core invariant\n");
     printf("\n");
     printf("options\n");
@@ -274,6 +276,7 @@ static int cmd_predict(const sk_opts *o)
     /* Same format as tests/ref_tiny.c: "scores" then one value per letter.
        Four decimals is plenty for a diff and avoids the int32 overflow that
        (frac * 1000000) would cause. */
+    printf("peak %ld%s\n", (long)ctx.peak, ctx.saturated ? " SATURATED" : "");
     printf("scores");
     for (i = 0; i < SK_T_VOCAB; i++) {
         sk_fix v = bt_scores[i];
@@ -284,6 +287,126 @@ static int cmd_predict(const sk_opts *o)
         printf(" %s%ld.%04ld", (v < 0) ? "-" : "", ip, fr);
     }
     printf("\n");
+
+    sk_ctx_close(&ctx);
+    sk_arena_done(&arena);
+    return 0;
+}
+
+/* Generate an answer.  Shares the setup with cmd_predict; the difference is
+ * the decoding loop, which mirrors TINY.C's pick() so the two can be
+ * compared letter for letter at creativity 0. */
+static int cmd_ask(const sk_opts *o)
+{
+    sk_model m;
+    sk_ctx ctx;
+    sk_arena arena;
+    sk_rng rng;
+    void *weights;
+    void *kvstore;
+    sk_u32 need;
+    sk_u32 kvneed;
+    sk_u32 got;
+    int used_ems;
+    char why[64];
+    const char *path;
+    const char *question;
+    unsigned char hdr[12];
+    FILE *fp;
+    char answer[SK_T_CTX + 1];
+    int n;
+
+    setvbuf(stdout, SK_NULL, _IONBF, 0);
+    sk_math_init();
+
+    path = (o->files > 0) ? o->filev[0] : o->out;
+    question = (o->files > 1) ? o->filev[1] : "hello";
+
+    fp = fopen(path, "rb");
+    if (fp == SK_NULL) {
+        printf("[sky] cannot open model '%s'\n", path);
+        return 6;
+    }
+    if (fread(hdr, 1, 12, fp) != 12 || memcmp(hdr, "TNY2", 4) != 0) {
+        fclose(fp);
+        printf("[sky] '%s' is not a TNY2 model\n", path);
+        return 6;
+    }
+    fclose(fp);
+
+    need = sk_model_size((sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8)),
+                         (sk_u32)((sk_u32)hdr[6] | ((sk_u32)hdr[7] << 8)),
+                         (sk_u32)((sk_u32)hdr[10] | ((sk_u32)hdr[11] << 8)),
+                         97UL, 128UL);
+    {
+        sk_u32 D = (sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8));
+        sk_u32 L = (sk_u32)((sk_u32)hdr[6] | ((sk_u32)hdr[7] << 8));
+
+        kvneed = L * (2UL * (sk_u32)SK_T_CTX * D + 8UL * (sk_u32)SK_T_CTX);
+    }
+
+    used_ems = 0;
+    if (sk_pool_open(&m.pool, need)) {
+        used_ems = 1;
+        got = m.pool.bytes;
+    } else {
+        got = sk_arena_init_best(&arena, need + kvneed + 65536UL,
+                                 need + kvneed, SK_MEM_OS);
+        if (got == 0) {
+            printf("[sky] cannot get %lu bytes\n",
+                   (unsigned long)(need + kvneed));
+            return 3;
+        }
+        weights = sk_arena_alloc(&arena, need);
+        if (weights == SK_NULL) {
+            printf("[sky] arena gave %lu bytes but weights need %lu\n",
+                   (unsigned long)got, (unsigned long)need);
+            sk_arena_done(&arena);
+            return 3;
+        }
+        if (!sk_pool_open_from(&m.pool, need, weights)) {
+            printf("[sky] cannot open the weight store\n");
+            sk_arena_done(&arena);
+            return 3;
+        }
+    }
+
+    if (!sk_model_load(&m, path, &m.pool, why, (sk_u32)sizeof(why))) {
+        printf("[sky] load failed: %s\n", why);
+        sk_arena_done(&arena);
+        return 6;
+    }
+
+    kvstore = SK_NULL;
+    if (!used_ems) {
+        kvstore = sk_arena_alloc(&arena, kvneed);
+        if (kvstore == SK_NULL) {
+            printf("[sky] cannot get %lu bytes for the KV cache\n",
+                   (unsigned long)kvneed);
+            sk_arena_done(&arena);
+            return 3;
+        }
+    }
+    if (!sk_ctx_open(&ctx, &m, kvstore, kvneed)) {
+        printf("[sky] cannot open the context\n");
+        sk_arena_done(&arena);
+        return 3;
+    }
+
+    sk_rng_seed(&rng, 0x9E3779B9UL, 0x243F6A88UL, 0xB7E15162UL, 1UL);
+
+    n = sk_generate(&ctx, question, answer, (int)sizeof(answer),
+                    o->creativity, &rng);
+    if (n < 0) {
+        printf("[sky] generation failed\n");
+        sk_ctx_close(&ctx);
+        sk_arena_done(&arena);
+        return 7;
+    }
+
+    /* Same line format as tests/ref_tiny.c's generate mode, so the two can
+       be diffed directly. */
+    printf("answer %s\n", answer);
 
     sk_ctx_close(&ctx);
     sk_arena_done(&arena);
@@ -719,6 +842,7 @@ int main(int argc, char **argv)
     o.ckpt_every = 64;
     o.log_every = 1024;
     o.durable = 0;
+    o.creativity = 0;
     o.arena_bytes = 8UL * 1024UL * 1024UL;
 
     for (i = 1; i < argc; i++) {
@@ -741,6 +865,8 @@ int main(int argc, char **argv)
             o.log_every = SK_U32(strtoul(argv[++i], SK_NULL, 10));
         } else if (strcmp(a, "--mem") == 0 && i + 1 < argc) {
             o.arena_bytes = SK_U32(strtoul(argv[++i], SK_NULL, 10));
+        } else if (strcmp(a, "--creativity") == 0 && i + 1 < argc) {
+            o.creativity = (int)strtol(argv[++i], SK_NULL, 10);
         } else if (strcmp(a, "--durable") == 0) {
             o.durable = 1;
         } else if (strcmp(a, "--seed") == 0 && i + 1 < argc) {
@@ -756,6 +882,7 @@ int main(int argc, char **argv)
                        || strcmp(a, "mem") == 0
                        || strcmp(a, "model") == 0
                        || strcmp(a, "predict") == 0
+                       || strcmp(a, "ask") == 0
                        || strcmp(a, "selftest") == 0)) {
             o.mode = a;
         } else if (o.files < 64) {
@@ -774,6 +901,8 @@ int main(int argc, char **argv)
         return cmd_model(&o);
     if (strcmp(o.mode, "predict") == 0)
         return cmd_predict(&o);
+    if (strcmp(o.mode, "ask") == 0)
+        return cmd_ask(&o);
     if (strcmp(o.mode, "recover") == 0)
         return cmd_recover(&o);
     if (strcmp(o.mode, "train") == 0) {

@@ -233,6 +233,7 @@ int main(int argc, char **argv)
     static float score[VOCAB];
     const char *model = argc > 1 ? argv[1] : "refs/Tiny-2.1-main/dos/TINY.BIN";
     const char *prompt = argc > 2 ? argv[2] : "hello";
+    const char *mode = argc > 3 ? argv[3] : "scores";
     int i, p, n;
 
     load_model(model);
@@ -244,6 +245,29 @@ int main(int argc, char **argv)
         if (tok < 2) tok = 2;
         if (tok >= VOCAB) tok = VOCAB - 1;
         step(tok, p, score);
+    }
+
+    if (strcmp(mode, "generate") == 0) {
+        /* Deterministic decoding: creativity 0 means "always the best
+           letter", which is the only mode that can be compared between two
+           implementations without sharing an RNG. The released TINY.C
+           reaches the same state through pick() with creativity <= 0. */
+        char out[CTX + 1];
+        int letters = 0;
+
+        step(1, p++, score);            /* end of the question */
+        for (; p < CTX; p++) {
+            int best = 0, tok;
+            for (i = 1; i < VOCAB; i++)
+                if (score[i] > score[best]) best = i;
+            tok = best;
+            if (tok <= 1) break;
+            out[letters++] = (char)(tok + 30);
+            step(tok, p, score);
+        }
+        out[letters] = 0;
+        printf("answer %s\n", out);
+        return 0;
     }
 
     /* Print the whole score vector, in the model's own fixed order, so a

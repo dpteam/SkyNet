@@ -287,13 +287,55 @@ jobs:
           # float rewrite would only prove I made the same mistake twice.
           cc -O2 -o build/ref_tiny tests/ref_tiny.c -lm
           fail=0
-          for q in "a" "hello" "what is the capital of peru"; do
+          for q in "a" "hello" "what is the capital of peru" "is a whale a fish" "opposite of hot"; do
             echo "--- $q"
             ./skynet predict refs/Tiny-2.1-main/dos/TINY.BIN "$q" > /tmp/fp.txt
             ./build/ref_tiny refs/Tiny-2.1-main/dos/TINY.BIN "$q" > /tmp/ref.txt
             python3 tools/compare_scores.py /tmp/ref.txt /tmp/fp.txt || fail=1
           done
           test "$fail" = 0
+
+      - name: every single letter produces the reference scores
+        run: |
+          set -e
+          # This is the check that caught the quantiser overflow: 8 of 26
+          # single-letter prompts were 50-80% off while everything longer
+          # looked fine, because the scale factor overflowed only when the
+          # vector's largest element was below 1.0. A spot check would have
+          # missed it.
+          cc -O2 -o build/ref_tiny tests/ref_tiny.c -lm
+          fail=0
+          for c in a b c d e f g h i j k l m n o p q r s t u v w x y z; do
+            ./skynet predict refs/Tiny-2.1-main/dos/TINY.BIN "$c" > /tmp/fp.txt
+            ./build/ref_tiny refs/Tiny-2.1-main/dos/TINY.BIN "$c" > /tmp/ref.txt
+            python3 tools/compare_scores.py /tmp/ref.txt /tmp/fp.txt > /dev/null || {
+              echo "::error::letter '$c' diverges from the reference"
+              fail=1
+            }
+          done
+          test "$fail" = 0
+          echo "all 26 letters match"
+
+      - name: answers are correct on the documented questions
+        run: |
+          set -e
+          # The released README states every question in its "Things to try"
+          # list is answered correctly by TINY.BIN. A faithful port that
+          # loaded the weights wrong would still be useless, so this checks
+          # the answers themselves, not just agreement with a reference.
+          python3 tools/ask_accuracy.py refs/Tiny-2.1-main/dos/TINY.BIN tests/expected.txt | tail -3
+          python3 tools/ask_accuracy.py refs/Tiny-2.1-main/dos/TINY.BIN tests/expected.txt \
+            | grep -q '35/35 correct' || {
+            echo "::error::accuracy regression"
+            exit 1
+          }
+
+      - name: decoding matches the reference on a question set
+        run: |
+          set -e
+          # Exact string agreement at creativity 0, the only decoding mode
+          # comparable without sharing an RNG.
+          python3 tools/ask_compare.py refs/Tiny-2.1-main/dos/TINY.BIN tests/questions.txt | tail -6
 
   # --------------------------------------------------------------- dos
   # DOS is the real target, so it gets a real 16-bit compiler AND a real

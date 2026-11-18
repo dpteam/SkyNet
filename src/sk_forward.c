@@ -145,7 +145,7 @@ static void sk_norm(const sk_fix *x, const sk_fix *g, sk_fix *y, int n)
 static sk_fix sk_quant_store(sk_pool *pool, sk_u32 off, const sk_fix *src, int n)
 {
     sk_u8 buf[SK_T_MAXD];
-    sk_fix big, k, t;
+    sk_fix big, t;
     int i;
 
     big = 0;
@@ -157,10 +157,19 @@ static sk_fix sk_quant_store(sk_pool *pool, sk_u32 off, const sk_fix *src, int n
     if (big <= 0)
         big = 1;                        /* all-zero vector: scale 1/127 */
 
-    k = sk_fix_mul(sk_fix_div(sk_fix_from_int(127), big),
-                   sk_fix_from_int(256));   /* 127/big in Q8.24 */
+    /* Scale each element by 127/big directly, instead of precomputing
+       k = 127/big and multiplying.  Precomputing looked cheaper and was
+       wrong: k has to be held in a fixed-point word, and for a vector whose
+       largest element is below 1 the value 127/big exceeds what Q8.24 can
+       represent.  It saturated, every element then quantised to +-127, and
+       the attention values for that position were destroyed - which is why
+       8 of 26 single-letter prompts produced scores 50-80% off while the
+       rest were within 1%.  A division per element is a few thousand
+       instructions per position and cannot overflow. */
     for (i = 0; i < n; i++) {
-        t = sk_scale_fix(src[i], k);
+        sk_fix num = sk_fix_mul(src[i], sk_fix_from_int(127));
+
+        t = sk_fix_div(num, big);
         /* round half away from zero, like the original cast */
         if (t >= 0)
             t = (t + 32768L) >> 16;
@@ -239,6 +248,9 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
     p = c->pos;
     if (p < 0 || p >= SK_T_CTX)
         return 0;
+
+    c->peak = 0;
+    c->saturated = 0;
 
     /* x = emb[tok] * emb_scale + pos[p] * pos_scale */
     if (!sk_table_row(&m->emb, (sk_u32)tok, bx))
@@ -358,6 +370,17 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
         for (i = 0; i < m->D; i++)
             bx[i] += bt[i];
 
+        /* Track the residual magnitude.  This is the number that says
+           whether Q16.16 is still adequate for this input: the model's
+           activations reach about 2900 and the format tops out at 32768. */
+        for (i = 0; i < m->D; i++) {
+            sk_fix a = (bx[i] < 0) ? -bx[i] : bx[i];
+            if (a > c->peak)
+                c->peak = a;
+            if (a >= SK_FIX_MAX)
+                c->saturated = 1;
+        }
+
 
         /* ---- feed forward ----------------------------------------- */
         sk_norm(bx, g2, bh, m->D);
@@ -386,6 +409,109 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
 
     c->pos++;
     return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* decoding                                                           */
+/* ------------------------------------------------------------------ */
+
+/* Token for a character, the same mapping TINY.C uses: c - 30, i.e. the
+   vocabulary is ' '..'~' starting at 2, with 0 = pad and 1 = newline. */
+static int sk_tok_of(int ch)
+{
+    int t = ch - 30;
+    if (t < 2)
+        t = 2;
+    if (t >= SK_T_VOCAB)
+        t = SK_T_VOCAB - 1;
+    return t;
+}
+
+int sk_generate(sk_ctx *c, const char *question, char *out, int outmax,
+                int creativity, sk_rng *rng)
+{
+    sk_fix scores[SK_T_VOCAB];
+    int p, n, letters;
+    int tok;
+
+    if (c == SK_NULL || question == SK_NULL || out == SK_NULL || outmax < 1)
+        return -1;
+    if (!c->ready)
+        return -1;
+
+    sk_ctx_reset(c);
+    letters = 0;
+    n = (int)strlen(question);
+    if (n <= 0 || n >= SK_T_CTX - 1)
+        return -1;
+
+    /* the question */
+    for (p = 0; p < n; p++) {
+        if (!sk_forward_step(c, sk_tok_of((unsigned char)question[p]), scores))
+            return -1;
+    }
+    /* token 1 is the end of the question */
+    if (!sk_forward_step(c, 1, scores))
+        return -1;
+
+    while (c->pos < SK_T_CTX && letters < outmax - 1) {
+        int best = 0;
+        int i;
+
+        for (i = 1; i < SK_T_VOCAB; i++) {
+            if (scores[i] > scores[best])
+                best = i;
+        }
+
+        if (creativity <= 0) {
+            tok = best;
+        } else {
+            /* t = creativity/5; weight = exp((s - best)/t), and anything
+               below 0.15 is dropped so the model never emits an unlikely
+               letter just because the dice said so. */
+            sk_fix t, sum, r, w[SK_T_VOCAB];
+            sk_fix total;
+
+            t = sk_fix_div(sk_fix_from_int(creativity), sk_fix_from_int(5));
+            if (t <= 0)
+                t = SK_FIX_ONE;
+            sum = 0;
+            for (i = 0; i < SK_T_VOCAB; i++) {
+                sk_fix d = sk_fix_div(scores[i] - scores[best], t);
+                sk_fix e = sk_fix_exp(d);
+                if (e < 9830)               /* 0.15 in Q16.16 */
+                    e = 0;
+                w[i] = e;
+                sum += e;
+            }
+            if (sum <= 0) {
+                tok = best;
+            } else {
+                total = sum;
+                r = sk_rng_range(rng, 0, 9999);
+                r = sk_fix_div(sk_fix_mul(total, sk_fix_from_int((int)r)),
+                               sk_fix_from_int(10000));
+                tok = best;
+                for (i = 0; i < SK_T_VOCAB; i++) {
+                    r -= w[i];
+                    if (r < 0 && w[i] > 0) {
+                        tok = i;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (tok <= 1)
+            break;                          /* end of the answer */
+
+        out[letters++] = (char)(tok + 30);
+        if (!sk_forward_step(c, tok, scores))
+            return -1;
+    }
+
+    out[letters] = '\0';
+    return letters;
 }
 
 /* ------------------------------------------------------------------ */
@@ -436,5 +562,38 @@ int sk_forward_selftest(void)
         if (d > 700)                     /* ~0.01 in Q16.16 */
             return 0;
     }
+
+    /* Regression for the bug that made 8 of 26 single-letter prompts wrong:
+       a vector whose largest element is below 1.0 used to overflow the
+       precomputed scale factor, saturate, and quantise every element to
+       +-127.  The check is simply that the quantised values keep their
+       proportions. */
+    {
+        sk_fix small[4];
+        sk_u8 q[4];
+
+        small[0] = SK_FIX_ONE / 2;      /* 0.5   */
+        small[1] = -SK_FIX_ONE / 4;     /* -0.25 */
+        small[2] = 0;
+        small[3] = SK_FIX_ONE / 8;      /* 0.125 */
+
+        if (sk_quant_store(&p, 64, small, 4) == 0)
+            return 0;
+        if (!sk_pool_read(&p, 64, q, 4))
+            return 0;
+
+        /* 0.5 is the maximum, so it must map to 127; -0.25 is half that in
+           magnitude, so -64; 0.125 is a quarter, so 32.  If the scale had
+           overflowed these would all be +-127. */
+        if ((sk_i32)(sk_i8)q[0] != 127)
+            return 0;
+        if ((sk_i32)(sk_i8)q[1] != -64 && (sk_i32)(sk_i8)q[1] != -63)
+            return 0;
+        if ((sk_i32)(sk_i8)q[2] != 0)
+            return 0;
+        if ((sk_i32)(sk_i8)q[3] != 32)
+            return 0;
+    }
+
     return 1;
 }

@@ -28,6 +28,7 @@
 #define SK_FORWARD_H
 
 #include "sk_types.h"
+#include "sk_math.h"
 #include "sk_tensor.h"
 
 /* Bytes of KV cache this model needs: per layer, k and v as int8 plus one
@@ -39,6 +40,12 @@ typedef struct {
     sk_pool   kv;                    /* EMS on DOS, flat buffer on host */
     int       pos;                   /* next free position              */
     int       ready;
+    /* Peak magnitude seen in the residual stream during the last step.
+       The model's activations reach about 2900, and Q16.16 tops out at
+       32768, so this is the number that says whether the fixed-point
+       representation is still holding. It is reported, not guessed at. */
+    sk_fix    peak;
+    int       saturated;             /* any value hit the Q16.16 ceiling */
 } sk_ctx;
 
 /* Open the context.  `kv_storage` backs the cache when EMS is not used. */
@@ -52,6 +59,17 @@ int  sk_forward_step(sk_ctx *c, int tok, sk_fix *scores);
 
 /* Reset the context so a new sequence can start at position 0. */
 void sk_ctx_reset(sk_ctx *c);
+
+/* ---- decoding --------------------------------------------------------
+   Mirrors TINY.C's pick():
+     creativity 0  -> always the best letter (deterministic)
+     creativity >0 -> sample among letters within exp(diff/t) >= 0.15,
+                      t = creativity/5, using the caller's RNG so the
+                      sequence is reproducible from a seed.
+   Generation stops at a token <= 1, which is the model's newline, or when
+   the answer buffer is full. */
+int sk_generate(sk_ctx *c, const char *question, char *out, int outmax,
+                int creativity, sk_rng *rng);
 
 /* Checks that need no model file. */
 int  sk_forward_selftest(void);
