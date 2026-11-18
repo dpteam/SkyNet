@@ -22,6 +22,8 @@
 #define SK_T_MAXD   128
 #define SK_T_MAXHID 512
 #define SK_T_MAXL   8
+#define SK_T_VOCAB  97
+#define SK_T_CTX    128
 
 /* One weight table: rows x cols int8 values, one Q16.16 scale per row.
  *

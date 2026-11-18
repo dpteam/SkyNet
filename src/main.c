@@ -21,9 +21,15 @@
 #include "sk_io.h"
 #include "sk_mem.h"
 #include "sk_tensor.h"
+#include "sk_forward.h"
 #include "sk_selftest.h"
 
 #define SK_VERSION "0.1.0-m0"
+
+/* Output of the last forward step.  Static rather than local: 97 Q16.16
+   values are 388 bytes, which is fine on a host and not something to put on
+   an 8 KB DOS stack next to everything else. */
+static sk_fix bt_scores[SK_T_VOCAB];
 
 typedef struct {
     const char *mode;
@@ -53,6 +59,7 @@ static void sk_usage(void)
     printf("  recover    show the state the vault would resume from\n");
     printf("  mem        report what memory this machine actually has\n");
     printf("  model FILE load a TNY2 model and report what it contains\n");
+    printf("  predict FILE TEXT  run the forward pass and print the scores\n");
     printf("  selftest   check every core invariant\n");
     printf("\n");
     printf("options\n");
@@ -112,6 +119,175 @@ static int cmd_selftest(void)
 static void sk_emit_stdout(const char *line)
 {
     printf("%s\n", line);
+}
+
+/* Run the forward pass over a prompt and print the raw score vector.
+ *
+ * The output format is deliberately identical to tests/ref_tiny.c, which is
+ * the original float implementation. Comparing against my own rewrite would
+ * only prove that I made the same mistake twice; comparing against the
+ * released code proves the fixed-point port is faithful. */
+static int cmd_predict(const sk_opts *o)
+{
+    sk_model m;
+    sk_ctx ctx;
+    sk_arena arena;
+    void *weights;
+    void *kvstore;
+    sk_u32 need;
+    sk_u32 kvneed;
+    sk_u32 got;
+    int used_ems;
+    char why[64];
+    const char *path;
+    const char *prompt;
+    unsigned char hdr[12];
+    FILE *fp;
+    int i, p, n;
+
+    setvbuf(stdout, SK_NULL, _IONBF, 0);
+
+    /* Not optional: sk_fix_exp() divides by ln(2), and the constants are
+       derived in sk_math_init().  Without this call every constant is zero,
+       exp() returns saturation, and the whole forward pass collapses to
+       zeros - which is exactly what it did the first time. */
+    sk_math_init();
+
+    path = (o->files > 0) ? o->filev[0] : o->out;
+    prompt = (o->files > 1) ? o->filev[1] : "hello";
+
+    fp = fopen(path, "rb");
+    if (fp == SK_NULL) {
+        printf("[sky] cannot open model '%s'\n", path);
+        return 6;
+    }
+    if (fread(hdr, 1, 12, fp) != 12 || memcmp(hdr, "TNY2", 4) != 0) {
+        fclose(fp);
+        printf("[sky] '%s' is not a TNY2 model\n", path);
+        return 6;
+    }
+    fclose(fp);
+
+    need = sk_model_size((sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8)),
+                         (sk_u32)((sk_u32)hdr[6] | ((sk_u32)hdr[7] << 8)),
+                         (sk_u32)((sk_u32)hdr[10] | ((sk_u32)hdr[11] << 8)),
+                         97UL, 128UL);
+
+    /* The KV cache is sized by the model too: per layer, two int8 tables of
+       CTX x D plus two arrays of CTX Q16.16 scales.  Ask for both up front -
+       sizing the arena for the weights alone leaves no room for the cache
+       and the run dies at the first forward step. */
+    {
+        sk_u32 D = (sk_u32)((sk_u32)hdr[4] | ((sk_u32)hdr[5] << 8));
+        sk_u32 L = (sk_u32)((sk_u32)hdr[6] | ((sk_u32)hdr[7] << 8));
+
+        kvneed = L * (2UL * (sk_u32)SK_T_CTX * D + 8UL * (sk_u32)SK_T_CTX);
+    }
+
+    /* Weights and KV cache both want to be big.  On DOS they must go to EMS:
+       the arena is capped at 64 KB by a 16-bit size_t, and Tiny-2.1 needs
+       372 KB of weights.  On a host the arena holds them. */
+    got = 0;
+    used_ems = 0;
+    if (sk_pool_open(&m.pool, need)) {
+        printf("[sky] weights in EMS: %lu KB in %lu pages\n",
+               (unsigned long)(m.pool.bytes / 1024UL),
+               (unsigned long)m.pool.pages);
+        got = m.pool.bytes;
+        used_ems = 1;
+    } else {
+        got = sk_arena_init_best(&arena, need + kvneed + 65536UL,
+                                 need + kvneed, SK_MEM_OS);
+        if (got == 0) {
+            printf("[sky] cannot get %lu bytes (need %lu for weights, "
+                   "%lu for the cache)\n",
+                   (unsigned long)(need + kvneed),
+                   (unsigned long)need, (unsigned long)kvneed);
+            return 3;
+        }
+        weights = sk_arena_alloc(&arena, need);
+        if (weights == SK_NULL) {
+            /* Never fail silently.  This exact branch swallowed the error on
+               DOS: the arena degraded to 64 KB, the weight allocation
+               returned NULL, and the program exited with no output at all. */
+            printf("[sky] arena gave %lu bytes but the weights need %lu\n",
+                   (unsigned long)got, (unsigned long)need);
+            sk_arena_done(&arena);
+            return 3;
+        }
+        if (!sk_pool_open_from(&m.pool, need, weights)) {
+            printf("[sky] cannot open the weight store\n");
+            sk_arena_done(&arena);
+            return 3;
+        }
+        printf("[sky] weights in linear memory: %lu KB\n",
+               (unsigned long)(need / 1024UL));
+    }
+
+    if (!sk_model_load(&m, path, &m.pool, why, (sk_u32)sizeof(why))) {
+        printf("[sky] load failed: %s\n", why);
+        sk_arena_done(&arena);
+        return 6;
+    }
+
+    kvneed = sk_ctx_kv_bytes(&m);
+    kvstore = SK_NULL;
+    if (!used_ems) {
+        /* the arena path needs storage for the cache as well */
+        kvstore = sk_arena_alloc(&arena, kvneed);
+        if (kvstore == SK_NULL) {
+            printf("[sky] cannot get %lu bytes for the KV cache\n",
+                   (unsigned long)kvneed);
+            sk_arena_done(&arena);
+            return 3;
+        }
+    }
+    if (!sk_ctx_open(&ctx, &m, kvstore, kvneed)) {
+        printf("[sky] cannot open the context (cache needs %lu bytes)\n",
+               (unsigned long)kvneed);
+        sk_arena_done(&arena);
+        return 3;
+    }
+
+    /* Feed the prompt, one letter at a time, exactly like the original. */
+    n = (int)strlen(prompt);
+    if (n <= 0 || n >= SK_T_CTX) {
+        printf("[sky] prompt must be 1..%d letters\n", SK_T_CTX - 1);
+        sk_ctx_close(&ctx);
+        sk_arena_done(&arena);
+        return 2;
+    }
+    for (p = 0; p < n; p++) {
+        int tok = (unsigned char)prompt[p] - ' ' + 2;
+        if (tok < 2)
+            tok = 2;
+        if (tok >= SK_T_VOCAB)
+            tok = SK_T_VOCAB - 1;
+        if (!sk_forward_step(&ctx, tok, bt_scores)) {
+            printf("[sky] forward pass failed at position %d\n", p);
+            sk_ctx_close(&ctx);
+            sk_arena_done(&arena);
+            return 7;
+        }
+    }
+
+    /* Same format as tests/ref_tiny.c: "scores" then one value per letter.
+       Four decimals is plenty for a diff and avoids the int32 overflow that
+       (frac * 1000000) would cause. */
+    printf("scores");
+    for (i = 0; i < SK_T_VOCAB; i++) {
+        sk_fix v = bt_scores[i];
+        long av = (v < 0) ? -(long)v : (long)v;
+        long ip = av >> 16;
+        long fr = (((av & 0xFFFFL) * 10000L) >> 16);
+
+        printf(" %s%ld.%04ld", (v < 0) ? "-" : "", ip, fr);
+    }
+    printf("\n");
+
+    sk_ctx_close(&ctx);
+    sk_arena_done(&arena);
+    return 0;
 }
 
 static int cmd_mem(void)
@@ -579,6 +755,7 @@ int main(int argc, char **argv)
                        || strcmp(a, "recover") == 0
                        || strcmp(a, "mem") == 0
                        || strcmp(a, "model") == 0
+                       || strcmp(a, "predict") == 0
                        || strcmp(a, "selftest") == 0)) {
             o.mode = a;
         } else if (o.files < 64) {
@@ -595,6 +772,8 @@ int main(int argc, char **argv)
         return cmd_mem();
     if (strcmp(o.mode, "model") == 0)
         return cmd_model(&o);
+    if (strcmp(o.mode, "predict") == 0)
+        return cmd_predict(&o);
     if (strcmp(o.mode, "recover") == 0)
         return cmd_recover(&o);
     if (strcmp(o.mode, "train") == 0) {

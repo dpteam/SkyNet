@@ -215,18 +215,41 @@ void sk_mem_report(const sk_meminfo *mi, void (*emit)(const char *line))
 #  define SK_EMS_WINDOW(seg) ((unsigned char *)MK_FP((seg), 0))
 #endif
 
-/* Map logical page `page` into window slot 0.
+/* The EMS page frame is a PHYSICAL resource: there is one window of four
+ * slots in conventional memory, shared by every pool in the process.  So
+ * "which page is currently mapped" is global state, not per-pool state.
+ *
+ * Keeping it per-pool was a real bug with two pools alive at once - the
+ * weights in one, the KV cache in another.  Pool A maps page 5, pool B maps
+ * page 9, then pool A reads again, sees its own cached "page 5 is mapped",
+ * skips the map call, and reads pool B's data.  The forward pass then
+ * produced different numbers on DOS than on the host with no error anywhere.
+ * Exactly the trap this API was designed to avoid: a pointer whose meaning
+ * changes behind your back. */
+static int sk_ems_mapped_handle = -1;
+static sk_u32 sk_ems_mapped_page = 0xFFFFFFFFUL;
+
+#if !defined(SK_HAVE_BIOS)
+/* Without BIOS access there is no window at all, so the bookkeeping above
+   is dead weight.  Marked used so the build stays warning-free on hosts. */
+static void sk_ems_window_unused(void)
+{
+    (void)sk_ems_mapped_handle;
+    (void)sk_ems_mapped_page;
+}
+#endif
+
+/* Map logical page `page` of handle `h` into window slot 0.
    Returns 1 on success, 0 on failure.  The caller then reads or writes
    through SK_EMS_WINDOW(frame_seg).  Any such pointer is valid only until
-   the next map, which is why the pool API is read/write and not a raw
-   pointer: an exposed pointer that silently changes meaning is the classic
-   EMS bug. */
+   the next map by ANY pool, which is why the pool API is read/write and
+   never hands out a raw pointer. */
 #if defined(SK_HAVE_BIOS)
 static int sk_pool_map(sk_pool *p, sk_u32 page)
 {
     if (p->backend != SK_POOL_EMS)
         return 0;
-    if (p->mapped == (int)page)
+    if (sk_ems_mapped_handle == p->handle && sk_ems_mapped_page == page)
         return 1;                       /* already in the window */
 
     {
@@ -236,10 +259,13 @@ static int sk_pool_map(sk_pool *p, sk_u32 page)
         unsigned dx = (unsigned)p->handle;
 
         sk_bios_int(0x67, ax, bx, 0, dx, &oax, 0, 0, 0);
-        if ((oax >> 8) != 0)
+        if ((oax >> 8) != 0) {
+            sk_ems_mapped_handle = -1;  /* window state now unknown */
             return 0;                   /* map refused */
+        }
     }
-    p->mapped = (int)page;
+    sk_ems_mapped_handle = p->handle;
+    sk_ems_mapped_page = page;
     p->maps++;
     return 1;
 }
@@ -394,6 +420,11 @@ void sk_pool_close(sk_pool *p)
     if (p->ready && p->backend == SK_POOL_EMS) {
         unsigned oax = 0;
         sk_bios_int(0x67, 0x4500, 0, 0, (unsigned)p->handle, &oax, 0, 0, 0);
+        /* The window may still show a page of the freed handle. */
+        if (sk_ems_mapped_handle == p->handle) {
+            sk_ems_mapped_handle = -1;
+            sk_ems_mapped_page = 0xFFFFFFFFUL;
+        }
     }
 #endif
     p->backend = SK_POOL_NONE;
@@ -401,6 +432,9 @@ void sk_pool_close(sk_pool *p)
     p->handle = 0;
     p->pages = 0;
     p->mapped = -1;
+#if !defined(SK_HAVE_BIOS)
+    sk_ems_window_unused();
+#endif
 }
 
 /* ------------------------------------------------------------------ */

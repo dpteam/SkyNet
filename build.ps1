@@ -16,7 +16,7 @@ Push-Location $root
 
 $src = @(
     "src/main.c", "src/sk_math.c", "src/sk_arena.c", "src/sk_clock.c",
-    "src/sk_vault.c", "src/sk_sched.c", "src/sk_io.c", "src/sk_mem.c", "src/sk_tensor.c", "src/sk_selftest.c"
+    "src/sk_vault.c", "src/sk_sched.c", "src/sk_io.c", "src/sk_mem.c", "src/sk_tensor.c", "src/sk_forward.c", "src/sk_selftest.c"
 )
 
 New-Item -ItemType Directory -Force build | Out-Null
@@ -65,7 +65,13 @@ if ($RunTests) {
     Write-Host "[test] selftest"
     & .\skynet.exe selftest
     if ($LASTEXITCODE -ne 0) { throw "selftest failed" }
-    if (Test-Path build\skynet_tcc.exe) {
+
+    # Only test the tcc binary if this run actually built it.  Testing a
+    # stale build\skynet_tcc.exe from an earlier run reports the result of
+    # code that no longer exists - which is exactly what happened: the
+    # output showed "40 passed" from the fresh binary and "38 passed" from
+    # an old one, and both looked like success.
+    if ($Compiler -ne "gcc" -and (Test-Path build\skynet_tcc.exe)) {
         Write-Host "[test] selftest under tcc build"
         & .\build\skynet_tcc.exe selftest
         if ($LASTEXITCODE -ne 0) { throw "tcc selftest failed" }

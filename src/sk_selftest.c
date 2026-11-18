@@ -11,6 +11,7 @@
 #include "sk_selftest.h"
 #include "sk_mem.h"
 #include "sk_tensor.h"
+#include "sk_forward.h"
 #include "sk_math.h"
 #include "sk_arena.h"
 #include "sk_clock.h"
@@ -283,6 +284,10 @@ int sk_selftest_run(void)
     printf("tensor...\n");
     fflush(stdout);
     sk_check("IEEE-754 to Q16.16 conversion", sk_tensor_selftest() == 1);
+
+    printf("forward...\n");
+    fflush(stdout);
+    sk_check("KV quantiser round-trip", sk_forward_selftest() == 1);
 
     printf("------------------\n");
     printf("%d passed, %d failed\n", sk_pass, sk_fail);

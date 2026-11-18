@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include "sk_types.h"
 #include "sk_tensor.h"
+#include "sk_forward.h"
 
 int main(void)
 {
@@ -27,7 +28,7 @@ int main(void)
     /* The model struct must stay small: on DOS the whole data segment is
        64 KB and the stack is 8 KB, so anything sized by SK_T_MAX* has to
        live in the pool, not in the struct. */
-    printf("sk_model=%d sk_table=%d sk_pool=%d\n",
-           (int)sizeof(sk_model), (int)sizeof(sk_table), (int)sizeof(sk_pool));
+    printf("sk_model=%d sk_table=%d sk_pool=%d sk_ctx=%d\n",
+           (int)sizeof(sk_model), (int)sizeof(sk_table), (int)sizeof(sk_pool), (int)sizeof(sk_ctx));
     return 0;
 }

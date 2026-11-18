@@ -447,10 +447,113 @@ sk_u32 sk_crc32c(const void *data, sk_u32 len)
 }
 
 /* ------------------------------------------------------------------ */
+/* 64-bit accumulator                                                 */
+/* ------------------------------------------------------------------ */
+
+void sk_acc_add(sk_u32 *hi, sk_u32 *lo, sk_i32 v)
+{
+    sk_u32 nlo = SK_U32(*lo + (sk_u32)v);
+    sk_u32 carry = (nlo < *lo) ? 1UL : 0UL;
+    sk_u32 hsign = (v < 0) ? 0xFFFFFFFFUL : 0UL;
+
+    *hi = SK_U32(*hi + hsign + carry);
+    *lo = nlo;
+}
+
+sk_fix sk_acc_result(sk_u32 hi, sk_u32 lo)
+{
+    sk_i32 s = (sk_i32)lo;
+
+    if (hi == 0UL)
+        return (s < 0) ? SK_FIX_MAX : s;       /* positive overflow */
+    if (hi == 0xFFFFFFFFUL)
+        return (s >= 0) ? SK_FIX_MIN : s;      /* negative overflow */
+    return (hi & 0x80000000UL) ? SK_FIX_MIN : SK_FIX_MAX;
+}
+
+/* unsigned 32x32 -> 64, by 16-bit limbs. */
+static void sk_mul32(sk_u32 a, sk_u32 b, sk_u32 *rhi, sk_u32 *rlo)
+{
+    sk_u32 a1 = a >> 16, a0 = a & 0xFFFFUL;
+    sk_u32 b1 = b >> 16, b0 = b & 0xFFFFUL;
+    sk_u32 p0 = SK_U32(a0 * b0);
+    sk_u32 p1 = SK_U32(a0 * b1);
+    sk_u32 p2 = SK_U32(a1 * b0);
+    sk_u32 p3 = SK_U32(a1 * b1);
+    sk_u32 mid;
+
+    /* mid <= 0xFFFF + 0xFFFF + 0xFFFF, so it fits in 18 bits */
+    mid = SK_U32((p0 >> 16) + (p1 & 0xFFFFUL) + (p2 & 0xFFFFUL));
+    *rlo = SK_U32((p0 & 0xFFFFUL) | (mid << 16));
+    *rhi = SK_U32(p3 + (p1 >> 16) + (p2 >> 16) + (mid >> 16));
+}
+
+sk_fix sk_acc_scale(sk_u32 hi, sk_u32 lo, sk_fix scale)
+{
+    sk_u32 sa, lh, ll, hh, hl;
+    sk_u32 w0, w1, w2, carry;
+    int neg;
+
+    if (scale == 0)
+        return 0;
+
+    /* (hi:lo) is a SIGNED 64-bit value in two's complement.  Multiplying it
+       as unsigned gives garbage for every negative sum - which is half of
+       them, and was the actual bug behind the forward pass saturating: the
+       accumulator was correct, the conversion was not.  Negate first, work
+       with magnitudes, and restore the sign at the end. */
+    neg = 0;
+    if ((hi & 0x80000000UL) != 0UL) {
+        neg = 1;
+        lo = SK_U32(~lo + 1UL);
+        hi = SK_U32(~hi + ((lo == 0UL) ? 1UL : 0UL));
+    }
+
+    sa = (sk_u32)scale;
+    if (scale < 0) {
+        neg = !neg;
+        sa = (sk_u32)(-scale);
+    }
+
+    /* (hi:lo) * sa as a 96-bit value w2:w1:w0 */
+    sk_mul32(lo, sa, &lh, &ll);
+    sk_mul32(hi, sa, &hh, &hl);
+    w0 = ll;
+    w1 = SK_U32(lh + hl);
+    carry = (w1 < lh) ? 1UL : 0UL;
+    w2 = SK_U32(hh + carry);
+
+    /* >> SK_SCALE_BITS (24) */
+    w0 = SK_U32((w0 >> 24) | (w1 << 8));
+    w1 = SK_U32((w1 >> 24) | (w2 << 8));
+    w2 = SK_U32(w2 >> 24);
+
+    /* The magnitude fits sk_fix only if w1 and w2 are zero. */
+    if (w1 != 0UL || w2 != 0UL)
+        return neg ? SK_FIX_MIN : SK_FIX_MAX;
+
+    if (neg) {
+        if (w0 > (sk_u32)SK_FIX_MAX)
+            return SK_FIX_MIN;
+        return -(sk_fix)w0;
+    }
+    if (w0 > (sk_u32)SK_FIX_MAX)
+        return SK_FIX_MAX;
+    return (sk_fix)w0;
+}
+
+sk_fix sk_scale_fix(sk_fix v, sk_fix scale24)
+{
+    sk_u32 h = (v < 0) ? 0xFFFFFFFFUL : 0UL;
+
+    return sk_acc_scale(h, (sk_u32)v, scale24);
+}
+
+/* ------------------------------------------------------------------ */
 /* IEEE-754 binary32 -> Q16.16                                        */
 /* ------------------------------------------------------------------ */
 
-sk_fix sk_f32_to_fix(sk_u32 bits)
+sk_i32 sk_f32_to_q(sk_u32 bits, int frac_bits)
 {
     sk_u32 exp;
     sk_u32 mant;
@@ -462,28 +565,19 @@ sk_fix sk_f32_to_fix(sk_u32 bits)
     exp  = (bits >> 23) & 0xFFUL;
     mant = bits & 0x7FFFFFUL;
 
-    if (exp == 0) {
-        /* zero or subnormal.  Subnormals are below 2^-126, which is far
-           under one LSB of Q16.16, so they round to zero. */
+    if (exp == 0)
         return 0;
-    }
-    if (exp == 0xFFUL) {
-        /* Inf or NaN: a weight file containing this is corrupt.  Saturate
-           so the damage is visible and bounded. */
+    if (exp == 0xFFUL)
         return sign ? SK_FIX_MIN : SK_FIX_MAX;
-    }
 
-    mant |= 0x800000UL;                /* restore the implicit leading 1 */
-    shift = (int)exp - 134;            /* value * 2^16 = mant * 2^shift */
+    mant |= 0x800000UL;                /* implicit leading 1 */
+    /* value * 2^frac = mant * 2^(exp-127-23+frac) */
+    shift = (int)exp - 150 + frac_bits;
 
     if (shift >= 0) {
-        if (shift >= 8 || (mant >> (32 - shift)) != 0) {
-            /* mant << shift would not fit in 32 bits */
+        if (shift >= 9 || (mant >> (32 - shift)) != 0)
             return sign ? SK_FIX_MIN : SK_FIX_MAX;
-        }
         v = SK_U32(mant << shift);
-        if (v > (sk_u32)SK_FIX_MAX)
-            return sign ? SK_FIX_MIN : SK_FIX_MAX;
     } else {
         int down = -shift;
         if (down >= 32)
@@ -492,5 +586,12 @@ sk_fix sk_f32_to_fix(sk_u32 bits)
             v = SK_U32(mant >> down);
     }
 
-    return sign ? -(sk_fix)v : (sk_fix)v;
+    if (v > (sk_u32)SK_FIX_MAX)
+        return sign ? SK_FIX_MIN : SK_FIX_MAX;
+    return sign ? -(sk_i32)v : (sk_i32)v;
+}
+
+sk_fix sk_f32_to_fix(sk_u32 bits)
+{
+    return (sk_fix)sk_f32_to_q(bits, 16);
 }

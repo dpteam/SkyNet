@@ -91,7 +91,7 @@ static int sk_load_table(sk_model *m, FILE *fp, sk_table *t,
         /* The float is converted arithmetically, not cast: the core has no
            floating point and must produce identical results on a machine
            with an FPU and one without. */
-        scale = sk_f32_to_fix(sk_rd32(buf));
+        scale = (sk_fix)sk_f32_to_q(sk_rd32(buf), SK_SCALE_BITS);
         sb[0] = (unsigned char)(scale & 0xFFL);
         sb[1] = (unsigned char)((scale >> 8) & 0xFFL);
         sb[2] = (unsigned char)((scale >> 16) & 0xFFL);
@@ -358,46 +358,8 @@ int sk_table_row(const sk_table *t, sk_u32 row, sk_fix *out)
         return 0;
 
     for (j = 0; j < t->cols; j++)
-        out[j] = sk_fix_mul(sk_fix_from_int((sk_i32)(signed char)buf[j]), s);
+        out[j] = sk_scale_fix(sk_fix_from_int((sk_i32)(signed char)buf[j]), s);
     return 1;
-}
-
-/* Exact 64-bit accumulator built from two 32-bit halves.
- *
- * A 96-wide dot product of int8 weights against Q16.16 activations needs
- * up to 38 bits: |w| <= 128, |x| < 2^31, 96 terms.  C89 has no portable
- * 64-bit type (long may be 32 bits, and long long is banned by the C89
- * rule), so the sum is kept as a hi/lo pair.  Getting this wrong is not
- * theoretical: the first version accumulated in a plain int32 and the
- * output peak came out five orders of magnitude too small, because the
- * per-term multiply was also wrong. */
-static void sk_acc_add(sk_u32 *hi, sk_u32 *lo, sk_i32 v)
-{
-    sk_u32 nlo = SK_U32(*lo + (sk_u32)v);
-    sk_u32 carry = (nlo < *lo) ? 1UL : 0UL;
-    sk_u32 hsign = (v < 0) ? 0xFFFFFFFFUL : 0UL;
-
-    *hi = SK_U32(*hi + hsign + carry);
-    *lo = nlo;
-}
-
-/* Take the accumulator back to a single sk_fix.
- *
- * The accumulator holds the Q16.16 sum directly, so no shift is needed -
- * only a check that the high word is pure sign extension.  The first
- * version shifted by 16 here as well, which divided the result by 65536
- * and made every output look like zero. */
-static sk_fix sk_acc_result(sk_u32 hi, sk_u32 lo)
-{
-    sk_i32 s = (sk_i32)lo;
-
-    if (hi == 0UL) {
-        return (s < 0) ? SK_FIX_MAX : s;       /* positive overflow */
-    }
-    if (hi == 0xFFFFFFFFUL) {
-        return (s >= 0) ? SK_FIX_MIN : s;      /* negative overflow */
-    }
-    return (hi & 0x80000000UL) ? SK_FIX_MIN : SK_FIX_MAX;
 }
 
 int sk_table_matvec(const sk_table *t, const sk_fix *x, sk_fix *y)
@@ -435,7 +397,7 @@ int sk_table_matvec(const sk_table *t, const sk_fix *x, sk_fix *y)
 
         if (!sk_table_scale(t, i, &scale))
             return 0;
-        y[i] = sk_fix_mul(sk_acc_result(hi, lo), scale);
+        y[i] = sk_acc_scale(hi, lo, scale);
     }
     return 1;
 }
