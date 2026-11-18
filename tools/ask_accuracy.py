@@ -12,13 +12,20 @@ weights wrong; this is the check that catches that.
 
 Usage: ask_accuracy.py <model> <expected.txt>
 """
+import os
 import subprocess
 import sys
+
+# The binary has an extension on Windows and none on POSIX. Hardcoding
+# "skynet.exe" worked locally and failed in CI, which is exactly the class
+# of mistake these tools exist to catch elsewhere.
+BIN = "skynet.exe" if os.name == "nt" else "./skynet"
+REF = os.path.join("build", "ref_tiny.exe" if os.name == "nt" else "ref_tiny")
 
 
 def ask(model, question):
     try:
-        out = subprocess.run(["skynet.exe", "ask", model, question],
+        out = subprocess.run([BIN, "ask", model, question],
                              capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
         return "<timeout>"

@@ -16,14 +16,30 @@ error, the flip is the model being undecided, not a port defect.
 
 Usage: ask_compare.py <model> <questions.txt> <cmd-a> <cmd-b>
 """
+import os
 import subprocess
 import sys
 
+BIN = "skynet.exe" if os.name == "nt" else "./skynet"
+REF = os.path.join("build", "ref_tiny.exe" if os.name == "nt" else "ref_tiny")
 
-def run(cmd, question):
+
+def run_a(q, model):
     try:
-        out = subprocess.run(cmd + [question], capture_output=True, text=True,
-                             timeout=300)
+        out = subprocess.run([BIN, "ask", model, q],
+                             capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return "<timeout>"
+    for line in out.stdout.splitlines():
+        if line.startswith("answer "):
+            return line[7:]
+    return "<no answer>"
+
+
+def run_b(q, model):
+    try:
+        out = subprocess.run([REF, model, q, "generate"],
+                             capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
         return "<timeout>"
     for line in out.stdout.splitlines():
@@ -39,40 +55,13 @@ def main():
     model = sys.argv[1]
     qfile = sys.argv[2]
 
-    a_cmd = ["skynet.exe", "ask", model]
-    b_cmd = ["build\\ref_tiny.exe", model, "__Q__", "generate"]
-
-    def run_a(q):
-        try:
-            out = subprocess.run(["skynet.exe", "ask", model, q],
-                                 capture_output=True, text=True, timeout=300)
-        except subprocess.TimeoutExpired:
-            return "<timeout>"
-        for line in out.stdout.splitlines():
-            if line.startswith("answer "):
-                return line[7:]
-        return "<no answer>"
-
-    # ref_tiny takes (model, question, mode), so the question goes in the
-    # middle: build the command per question instead of appending.
-    def run_b(q):
-        try:
-            out = subprocess.run(["build\\ref_tiny.exe", model, q, "generate"],
-                                 capture_output=True, text=True, timeout=300)
-        except subprocess.TimeoutExpired:
-            return "<timeout>"
-        for line in out.stdout.splitlines():
-            if line.startswith("answer "):
-                return line[7:]
-        return "<no answer>"
-
     questions = [q.strip() for q in open(qfile, encoding="utf-8") if q.strip()]
     same = 0
     diff = []
 
     for i, q in enumerate(questions, 1):
-        a = run_a(q)
-        b = run_b(q)
+        a = run_a(q, model)
+        b = run_b(q, model)
         ok = (a == b)
         if ok:
             same += 1
