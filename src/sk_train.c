@@ -40,6 +40,8 @@ typedef struct {
     sk_arena arena;
     int      T;
     sk_fix   last_loss;
+    sk_i32   drift;
+    sk_i32   avg[SK_T_VOCAB];
 } sk_priv;
 
 static sk_priv *sk_p(sk_train *t)
@@ -298,7 +300,7 @@ sk_fix sk_train_grads(sk_train *t, const int *tokens, int ntok,
             sk_fix dot[SK_T_VOCAB];
             int r;
 
-            if (!sk_table_matvec_noscale(&m->emb, hf, dot)) {
+            if (!sk_table_matvec_noscale(&m->out, hf, dot)) {
                 sk_ctx_close(&ctx);
                 sk_arena_release(&p->arena, mark);
                 return 0;
@@ -315,11 +317,13 @@ sk_fix sk_train_grads(sk_train *t, const int *tokens, int ntok,
     return p->last_loss;
 }
 
-void sk_train_update(sk_train *t, sk_i32 lr24)
+void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust)
 {
     sk_priv *p;
     sk_model *m;
     int r;
+    sk_i32 sum_before = 0, sum_after = 0;
+    int changed = 0;
 
     if (t == SK_NULL || t->priv == SK_NULL)
         return;
@@ -327,16 +331,30 @@ void sk_train_update(sk_train *t, sk_i32 lr24)
     m = t->m;
 
     for (r = 0; r < SK_T_VOCAB; r++) {
-        sk_fix sc;
+        sk_fix sc, after;
 
         if (p->g_emb[r] == 0)
             continue;
-        if (!sk_table_scale_read(&m->emb, (sk_u32)r, &sc))
+        if (!sk_table_scale_read(&m->out, (sk_u32)r, &sc))
             continue;
-        sc = sk_g24_apply(sc, p->g_emb[r], lr24);
-        sk_table_scale_write(&m->emb, (sk_u32)r, sc);
+        after = sk_g24_apply_rms(sc, p->g_emb[r], lr24,
+                                 &p->avg[r], trust);
+        sk_table_scale_write(&m->out, (sk_u32)r, after);
+        sum_before += sc;
+        sum_after += after;
+        changed++;
     }
+    /* Drift is the number that explains "improves then degrades": if the
+       mean scale keeps shrinking, rows are being pushed toward zero and
+       dying, and the loss has to rise eventually. */
+    if (changed > 0)
+        p->drift = sum_after - sum_before;
     sk_train_zero_grads(t);
+}
+
+sk_i32 sk_train_drift(sk_train *t)
+{
+    return (t == SK_NULL || t->priv == SK_NULL) ? 0 : sk_p(t)->drift;
 }
 
 sk_fix sk_train_last_loss(sk_train *t)

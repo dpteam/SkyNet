@@ -38,10 +38,15 @@ sk_fix sk_train_grads(sk_train *t, const int *tokens, int ntok,
                       int answer_from);
 
 /* Apply the accumulated gradients and zero them. */
-void sk_train_update(sk_train *t, sk_i32 lr24);
+void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust);
 
 /* Zero the gradient accumulators without applying them. */
 void sk_train_zero_grads(sk_train *t);
+
+/* Net change in the sum of output scales from the last update. Negative
+ * means the rows are shrinking; sustained negative drift is what makes a
+ * model improve for a few epochs and then degrade. */
+sk_i32 sk_train_drift(sk_train *t);
 
 /* The loss of the last sequence. */
 sk_fix sk_train_last_loss(sk_train *t);

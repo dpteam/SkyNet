@@ -53,6 +53,27 @@ void sk_grad_dx_add(sk_fix *dx, sk_i32 dy24, sk_i32 scale24, sk_i32 w);
  * scale itself and the loss rose every epoch. */
 sk_i32 sk_g24_apply(sk_i32 scale24, sk_i32 grad24, sk_i32 lr24);
 
+/* Same, but the step may not exceed `max_rel` of the current scale.
+ *
+ * dL/dscale = dL/dlogits * dot, and dot ranges from about 30 to 2000 across
+ * rows of the same model. A single absolute rate therefore either does
+ * nothing for small rows or overshoots for large ones: measured, the loss
+ * fell for five epochs and then rose. A relative cap makes one rate work
+ * for all of them. */
+sk_i32 sk_g24_apply_trust(sk_i32 scale24, sk_i32 grad24, sk_i32 lr24,
+                          sk_i32 max_rel);
+
+/* RMSProp-style step: divide each row's update by the running magnitude of
+ * that row's gradient, then apply the same relative trust cap.
+ *
+ * dL/dscale[i] = dL/dlogit[i] * dot[i], and dot differs by up to 60x across
+ * the 97 output rows. One correct row against 96 wrong ones therefore
+ * produces a systematic net shrink of the scales, which flattens the output
+ * distribution: measured, the loss improved for two epochs and then rose.
+ * Normalising per row removes the dependence on dot. */
+sk_i32 sk_g24_apply_rms(sk_i32 scale24, sk_i32 grad24, sk_i32 lr24,
+                        sk_i32 *avg24, sk_i32 max_rel);
+
 /* Checks. */
 int sk_grad_selftest(void);
 

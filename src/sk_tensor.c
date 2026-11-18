@@ -114,7 +114,9 @@ sk_u32 sk_model_size_bits(sk_u32 D, sk_u32 L, sk_u32 HID,
        8 bits even in 4-bit mode - see the note in sk_model_load_shaped. */
     int ebits = (bits == 4) ? 8 : bits;
 
-    n = sk_table_bytes_bits(vocab, D, ebits) + sk_table_bytes_bits(ctx, D, ebits);
+    /* emb and out are separate tables now, so both are counted. */
+    n = sk_table_bytes_bits(vocab, D, ebits) + sk_table_bytes_bits(ctx, D, ebits)
+      + sk_table_bytes_bits(vocab, D, ebits);
     for (l = 0; l < L; l++) {
         n += 4UL * D;                                   /* g1 gains   */
         n += 4UL * sk_table_bytes_bits(D, D, bits);     /* wq wk wv wo */
@@ -124,6 +126,62 @@ sk_u32 sk_model_size_bits(sk_u32 D, sk_u32 L, sk_u32 HID,
     }
     n += 4UL * D;                                       /* gf gains   */
     return n;
+}
+
+/* Copy one table to a new location in the same pool.  Used to initialise
+   the output projection from the embedding table, which is what unties the
+   two while keeping inference identical to the released model. */
+static int sk_copy_table(sk_model *m, sk_table *dst, const sk_table *src,
+                         char *why, sk_u32 whylen)
+{
+    signed char w[SK_T_MAXHID];
+    sk_fix scale;
+    sk_u32 r;
+
+    dst->pool = &m->pool;
+    dst->rows = src->rows;
+    dst->cols = src->cols;
+    dst->bits = src->bits;
+    dst->base = m->used;
+
+    if (m->used > m->pool.bytes
+        || sk_table_bytes_bits(src->rows, src->cols, src->bits)
+           > m->pool.bytes - m->used) {
+        sk_why(why, whylen, "no room for the output projection");
+        return 0;
+    }
+
+    /* Write the scale array first, then the rows, matching the layout
+       sk_load_table_partial produces. */
+    for (r = 0; r < src->rows; r++) {
+        if (!sk_table_scale_read(src, r, &scale)
+            || !sk_table_scale_write(dst, r, scale)) {
+            sk_why(why, whylen, "cannot copy scales");
+            return 0;
+        }
+    }
+    {
+        sk_u32 wbase = dst->base + dst->rows * 4UL;
+        sk_u32 stride = sk_table_stride(dst->cols, dst->bits);
+
+        for (r = 0; r < src->rows; r++) {
+            if (!sk_table_read_row(src, r, w))
+                return 0;
+            if (dst->bits == 4) {
+                unsigned char packed[(SK_T_MAXHID + 1) / 2];
+
+                sk_pack_q4((const unsigned char *)w, packed, dst->cols);
+                if (!sk_pool_write(&m->pool, wbase + r * stride, packed, stride))
+                    return 0;
+            } else {
+                if (!sk_pool_write(&m->pool, wbase + r * stride,
+                                   w, dst->cols))
+                    return 0;
+            }
+        }
+    }
+    m->used += sk_table_bytes_bits(src->rows, src->cols, src->bits);
+    return 1;
 }
 
 /* Read a table, keeping only the first rows_used x cols_used corner of a
@@ -438,6 +496,14 @@ int sk_model_load_shaped(sk_model *m, const char *path, sk_pool *pool,
                        (m->bits == 4) ? 8 : m->bits, why, whylen)
         || !sk_load_table(m, fp, &m->pos, (sk_u32)m->ctx, (sk_u32)m->D,
                           (m->bits == 4) ? 8 : m->bits, why, whylen)) {
+        fclose(fp);
+        return 0;
+    }
+
+    /* Untie the output projection: an exact copy of the embedding table,
+       which keeps inference identical to the released model and lets the
+       trainer update one without damaging the other. */
+    if (!sk_copy_table(m, &m->out, &m->emb, why, whylen)) {
         fclose(fp);
         return 0;
     }

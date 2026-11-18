@@ -139,6 +139,100 @@ sk_i32 sk_g24_apply(sk_i32 scale24, sk_i32 grad24, sk_i32 lr24)
     return scale24;
 }
 
+sk_i32 sk_g24_apply_trust(sk_i32 scale24, sk_i32 grad24, sk_i32 lr24,
+                          sk_i32 max_rel)
+{
+    sk_i32 delta;
+    sk_i32 cap;
+
+    if (lr24 == 0 || grad24 == 0 || scale24 <= 0)
+        return scale24;
+
+    delta = sk_g24_mul(grad24, lr24);
+
+    /* Relative trust region: the step may not exceed `max_rel` of the
+       current scale. This is what makes one learning rate work across
+       rows whose gradients differ by an order of magnitude.
+       Measured need: dL/dscale = dL/dlogits * dot, and dot ranges from
+       about 30 to 2000 across rows, so a fixed absolute rate either does
+       nothing for small rows or overshoots for large ones. Without this
+       the loss fell for five epochs and then rose - the classic signature
+       of a step size that suits some parameters and not others. */
+    cap = sk_g24_mul(scale24, max_rel);
+    if (delta > cap)
+        delta = cap;
+    if (delta < -cap)
+        delta = -cap;
+
+    scale24 -= delta;
+    if (scale24 < 0)
+        scale24 = 0;
+    return scale24;
+}
+
+/* RMSProp-style step, one accumulator per row.
+ *
+ * Why the plain gradient is not enough here, measured rather than assumed:
+ * dL/dscale[i] = dL/dlogit[i] * dot[i]. Over 97 output classes there is one
+ * correct row and 96 wrong ones, and their dot products differ by up to
+ * 60x. The wrong rows therefore get large gradients and shrink, while the
+ * correct row gets a small one and can only grow by the trust cap. The
+ * result is a systematic net shrink of about -6000 units per epoch, and the
+ * loss improves for two epochs and then rises because the output
+ * distribution is being flattened.
+ *
+ * Dividing each row's step by the running magnitude of that row's gradient
+ * removes the dependence on dot entirely, so every row moves at a
+ * comparable rate and the balance between the correct row and the 96 wrong
+ * ones is preserved.
+ */
+sk_i32 sk_g24_apply_rms(sk_i32 scale24, sk_i32 grad24, sk_i32 lr24,
+                        sk_i32 *avg24, sk_i32 max_rel)
+{
+    sk_i32 delta, cap, mag;
+
+    if (scale24 <= 0)
+        return scale24;
+
+    /* running mean of |grad|, 1/8 step */
+    mag = (grad24 < 0) ? -grad24 : grad24;
+    *avg24 += (mag - *avg24) >> 3;
+    if (*avg24 < 1)
+        *avg24 = 1;
+
+    if (grad24 == 0 || lr24 == 0)
+        return scale24;
+
+    /* delta = lr * (grad / avg).
+     *
+     * The division has to come FIRST. Multiplying grad by lr and dividing
+     * by avg afterwards underflows: with grad around 5000 (Q8.24, i.e.
+     * 3e-4) and lr around 17 (1e-6), the product is below one LSB and
+     * rounds to zero, so nothing moves at all - which is exactly what the
+     * first version of this function did, and it looked like the gradient
+     * had vanished.
+     *
+     * sk_fix_div on two Q8.24 values yields the ratio in Q16.16, so one
+     * shift converts it to Q8.24 before the multiply by the rate. */
+    {
+        sk_i32 ratio16 = sk_fix_div(grad24, *avg24);
+        sk_i32 ratio24 = sk_g24_from16(ratio16);
+
+        delta = sk_g24_mul(ratio24, lr24);
+    }
+
+    cap = sk_g24_mul(scale24, max_rel);
+    if (delta > cap)
+        delta = cap;
+    if (delta < -cap)
+        delta = -cap;
+
+    scale24 -= delta;
+    if (scale24 < 0)
+        scale24 = 0;
+    return scale24;
+}
+
 /* ------------------------------------------------------------------ */
 /* selftest                                                           */
 /* ------------------------------------------------------------------ */

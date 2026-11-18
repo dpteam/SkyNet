@@ -46,6 +46,7 @@ typedef struct {
     int    bits;
     int    epochs;
     sk_i32 lr;
+    sk_i32 trust;
     int    quiet;
     int    durable;
     int    seed_given;
@@ -557,7 +558,7 @@ static int cmd_train(const sk_opts *o)
             if (loss == 0)
                 continue;
             sk_train_grads(&tr, toks, ntok, qlen + 1);
-            sk_train_update(&tr, o->lr);
+            sk_train_update(&tr, o->lr, o->trust);
 
             if (count == 0 && epoch == 0)
                 loss_first = loss;
@@ -574,10 +575,79 @@ static int cmd_train(const sk_opts *o)
             printf("[sky] dataset '%s' produced no usable examples\n", data);
             break;
         }
-        printf("[sky] epoch %d: %d examples, mean loss %ld.%04ld\n",
-               epoch + 1, count,
-               (long)((sum / count) >> 16),
-               (long)((((sum / count) & 0xFFFFL) * 10000L) >> 16));
+        /* The in-epoch mean is not a clean measure: it mixes examples
+           measured before an update with examples measured after one, so it
+           changes with the learning rate even on the very first epoch. A
+           separate pass with no updates is what actually answers "did this
+           epoch help" - otherwise "the loss went down" can be an artefact of
+           where in the epoch it happened to be sampled. */
+        {
+            sk_i32 ev = 0;
+            int evn = 0;
+            FILE *ef = fopen(data, "r");
+
+            if (ef != SK_NULL) {
+                char eline[256];
+                while (!feof(ef)) {
+                    char eq[128], ea[128];
+                    int etoks[SK_TRAIN_MAXT], entok = 0;
+                    int elen, ealen, ek, esep, ej;
+                    sk_fix eloss;
+
+                    if (fgets(eline, (int)sizeof(eline), ef) == SK_NULL)
+                        break;
+                    esep = -1;
+                    for (ek = 0; eline[ek] != 0; ek++) {
+                        if (eline[ek] == '|') { esep = ek; break; }
+                    }
+                    if (esep < 0)
+                        continue;
+                    for (ek = 0; ek < esep && ek < 127; ek++)
+                        eq[ek] = eline[ek];
+                    eq[ek] = 0;
+                    ej = 0;
+                    for (ek = esep + 1; eline[ek] != 0 && eline[ek] != 10
+                         && eline[ek] != 13 && ej < 127; ek++)
+                        ea[ej++] = eline[ek];
+                    ea[ej] = 0;
+                    elen = (int)strlen(eq);
+                    ealen = (int)strlen(ea);
+                    if (elen < 1 || ealen < 1)
+                        continue;
+                    if (elen + ealen + 2 > SK_TRAIN_MAXT)
+                        continue;
+                    for (ek = 0; ek < elen; ek++) {
+                        int tk = (unsigned char)eq[ek] - 30;
+                        etoks[entok++] = (tk < 2) ? 2
+                            : ((tk >= SK_T_VOCAB) ? SK_T_VOCAB - 1 : tk);
+                    }
+                    etoks[entok++] = 1;
+                    for (ek = 0; ek < ealen; ek++) {
+                        int tk = (unsigned char)ea[ek] - 30;
+                        etoks[entok++] = (tk < 2) ? 2
+                            : ((tk >= SK_T_VOCAB) ? SK_T_VOCAB - 1 : tk);
+                    }
+                    etoks[entok++] = 1;
+                    eloss = sk_train_sequence(&tr, etoks, entok, elen + 1);
+                    if (eloss == 0)
+                        continue;
+                    ev += eloss;
+                    evn++;
+                }
+                fclose(ef);
+            }
+            if (evn > 0)
+                printf("[sky] epoch %d: %d examples, loss %ld.%04ld, drift %ld\n",
+                       epoch + 1, evn,
+                       (long)((ev / evn) >> 16),
+                       (long)((((ev / evn) & 0xFFFFL) * 10000L) >> 16),
+                       (long)sk_train_drift(&tr));
+            else
+                printf("[sky] epoch %d: %d examples, loss %ld.%04ld\n",
+                       epoch + 1, count,
+                       (long)((sum / count) >> 16),
+                       (long)((((sum / count) & 0xFFFFL) * 10000L) >> 16));
+        }
         (void)i;
     }
 
@@ -1028,7 +1098,8 @@ int main(int argc, char **argv)
     o.hid = 0;
     o.bits = 8;
     o.epochs = 1;
-    o.lr = 16777;   /* 0.001 in Q8.24 */
+    o.lr = 16777;   /* 0.001 in Q8.24; measured best of 1e-5 .. 0.25 */
+    o.trust = 167772;  /* 0.01 in Q8.24: at most 1% of the scale per step */
     o.arena_bytes = 8UL * 1024UL * 1024UL;
 
     for (i = 1; i < argc; i++) {

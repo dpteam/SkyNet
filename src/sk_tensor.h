@@ -67,6 +67,20 @@ typedef struct {
     sk_table emb;
     sk_table pos;
 
+    /* The output projection.
+     *
+     * In the released model this IS the embedding table (weight tying):
+     * `logits = emb * hf`. That is efficient but it means one tensor serves
+     * two purposes, and the measurement in docs/06-training.md showed what
+     * that costs: training the output side degrades the input side, and the
+     * loss stops falling across examples.
+     *
+     * So the two are untied here. `out` starts as an exact copy of `emb`,
+     * which keeps inference bit-identical to the released model, and can
+     * then be trained independently. Cost: 97 x D bytes plus 97 scales,
+     * about 9.7 KB for the released shape. */
+    sk_table out;
+
     sk_table wq[SK_T_MAXL];
     sk_table wk[SK_T_MAXL];
     sk_table wv[SK_T_MAXL];

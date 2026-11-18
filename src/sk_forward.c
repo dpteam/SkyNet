@@ -415,7 +415,7 @@ int sk_forward_step(sk_ctx *c, int tok, sk_fix *scores)
             return 0;
         sk_norm(bx, gf, bh, m->D);
         memcpy(c->hf, bh, (size_t)m->D * sizeof(sk_fix));
-        if (!sk_table_matvec(&m->emb, bh, scores))
+        if (!sk_table_matvec(&m->out, bh, scores))
             return 0;
     }
 
