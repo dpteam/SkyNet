@@ -62,6 +62,20 @@ int sk_shadow_store(const sk_table *t, const sk_i32 *w);
 /* Re-quantise and write back, which is the same function. Named separately
  * at the call site in main.c for readability. */
 
+/* Row at a time, which is how the trainer actually wants it.
+ *
+ * Two reasons, and the second is the important one:
+ *
+ *   - memory: one row of masters is SK_T_MAXHID ints, 2 KB, where a whole
+ *     table is 96 KB. On a 640 KB machine that is the difference between
+ *     possible and not.
+ *   - correctness: the scale is derived from the row maximum, so the unit of
+ *     both the expansion and the compression is the row. Doing a whole table
+ *     at once only hides that.
+ */
+int sk_shadow_row_load(const sk_table *t, sk_u32 row, sk_i32 *w);
+int sk_shadow_row_store(const sk_table *t, sk_u32 row, const sk_i32 *w);
+
 /* One gradient step on the masters.
  *
  * `grad` is the mean dL/dW_eff in Q16.16 for the same layout, or NULL.
@@ -72,6 +86,18 @@ int sk_shadow_store(const sk_table *t, const sk_i32 *w);
  *
  * Returns the number of elements that actually changed. */
 int sk_shadow_step(sk_i32 *w, const sk_fix *grad, sk_i32 lr24, sk_u32 n);
+
+/* One step with a trust region on the row.
+ *
+ * `grad` is the mean dL/dW_eff in Q16.16. The step is capped at
+ * `max_rel` of the row's own largest magnitude, for the same measured reason
+ * the row scales are capped: gradients across rows differ by an order of
+ * magnitude, and a rate that is right for the big ones destroys the small
+ * ones. Capping by the row's own scale makes one rate work for all of them.
+ *
+ * Returns the number of elements that actually changed. */
+int sk_shadow_step_row(sk_i32 *w, const sk_fix *grad, sk_u32 n,
+                       sk_i32 lr24, sk_i32 max_rel);
 
 /* Largest single master in a table, for reporting. Q8.24. */
 sk_fix sk_shadow_max(const sk_i32 *w, sk_u32 n);

@@ -140,6 +140,24 @@ L0.f1       256x96          0      0  identical
 и считался масштаб), то `max|shadow|/127` делится без остатка. Подробности в
 [docs/07-weights.md](docs/07-weights.md).
 
+Обучение самих весов включается флагом:
+
+```bash
+skynet train TINY.BIN dataset.txt --epochs 4 --lr 671088 --codes
+```
+
+```
+[sky] training the int8 weights as well as the row scales
+[sky] epoch 1: 34 examples, loss 0.0605, drift -12589, weights moved 19441
+[sky] epoch 2: 34 examples, loss 0.0384, drift -10822, weights moved 15699
+[sky] epoch 3: 34 examples, loss 0.0346, drift -9502, weights moved 16348
+```
+
+Кодам нужен шаг примерно в сто раз больше, чем масштабам (`dL/dW` ≈ 4e-4
+против `dL/dscale` ≈ 0.1): при `--codes` разумный lr — 0.02…0.04, без него
+0.00025. Строка `weights moved` показывает, сколько элементов реально
+сдвинулось; ноль означал бы, что шаг ниже разрешения мастера.
+
 ## Отладка инференса
 
 Внутренности видны без перекомпиляции — это было главной болью при разработке

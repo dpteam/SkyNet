@@ -81,6 +81,9 @@ sk_fix sk_train_grad_get(sk_train *t, int kind, int index);
 int sk_train_param_get(sk_train *t, int kind, int index, sk_fix *out);
 int sk_train_param_set(sk_train *t, int kind, int index, sk_fix value);
 
+/* How many weight elements the last update moved. */
+int sk_train_codes_changed(sk_train *t);
+
 /* The accumulated mean gradient for one output row, raw Q16.16.
  * Not Q8.24: converting saturates above 128 and hides large gradients. */
 sk_i32 sk_train_grad_row(sk_train *t, int r);

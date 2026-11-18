@@ -30,6 +30,7 @@
 #include "sk_math.h"
 #include "sk_forward.h"
 #include "sk_arena.h"
+#include "sk_shadow.h"
 
 /* ---------------------------------------------------------------------
  * Gradient gain: every gradient in this file carries a factor of
@@ -94,6 +95,7 @@ typedef struct {
     sk_fix   last_loss;
     sk_i32   drift;
     int      grad_count;
+    int      codes_changed;       /* elements the last code step moved    */
     sk_i32   avg[SK_T_VOCAB];     /* RMSProp running |grad|, one per row */
     sk_i32  *avg_f1;              /* last block f1 rows                HID */
     sk_i32  *avg_f2;              /* last block f2 rows                  D */
@@ -107,6 +109,10 @@ typedef struct {
      * SK_TRAIN_CODES was requested. */
     sk_i32  *dw_f1;               /* HID x D */
     sk_i32  *dw_f2;               /* D x HID */
+
+    /* One row of masters, reused. A whole table is 96 KB; a row is 2 KB, and
+       the scale is derived per row anyway, so the row is the natural unit. */
+    sk_i32  *mrow;
 } sk_priv;
 
 static sk_priv *sk_p(sk_train *t)
@@ -174,7 +180,8 @@ sk_u32 sk_train_bytes(const sk_model *m, int flags)
            trainer's appetite cannot disagree - that mismatch is how the
            trace buffers once ran the arena dry and made every gradient read
            as zero. */
-        total += (HID * D + D * HID) * 4UL;
+        total += (HID * D + D * HID) * 4UL;   /* dW accumulators */
+        total += (sk_u32)SK_T_MAXHID * 4UL;   /* one row of masters */
     }
     total += (V + D * 3UL + HID + D) * 4UL;  /* gradient accumulators */
     total += (HID + D * 4UL) * 4UL;          /* running |grad| per row */
@@ -230,6 +237,12 @@ int sk_train_open(sk_train *t, sk_model *m, void *storage, sk_u32 bytes,
         }
         memset(p->dw_f1, 0, (size_t)HID * D * sizeof(sk_i32));
         memset(p->dw_f2, 0, (size_t)D * HID * sizeof(sk_i32));
+        p->mrow = (sk_i32 *)sk_arena_alloc(&p->arena,
+                                           (sk_u32)SK_T_MAXHID * 4UL);
+        if (p->mrow == SK_NULL) {
+            printf("[train] no room for the master row buffer\n");
+            return 0;
+        }
     }
 
     p->t_hn2 = (sk_fix *)sk_arena_alloc(&p->arena, T * D * 4UL);
@@ -723,6 +736,67 @@ static sk_fix sk_upd_gain(sk_fix gain, sk_i32 grad16, sk_i32 lr24,
     return after >> 8;
 }
 
+/* Train the CODES of one last-block table, row by row.
+ *
+ * Why this cannot be folded into the row-scale update below, and why the two
+ * are mutually exclusive for the same table:
+ *
+ *   The scale of a row is derived from its largest weight once the codes are
+ *   trainable. Training the scale as a free parameter as well gives two
+ *   writers to one number - the scale step would move it, then the
+ *   recompression would immediately recompute it from the new maximum and
+ *   overwrite the step. The first version of this did both, and the result
+ *   was a model that trained for six epochs and changed nothing, because
+ *   every scale step was being undone microseconds later.
+ *
+ * So: codes OR scales, never both, for a given table.
+ *
+ * `grad` is the raw accumulator, `count` the number of loss positions it was
+ * summed over, `gained` whether it carries SK_GRAD_GAIN. The mean is taken
+ * here for the same reason as everywhere else: the loss is a mean, so its
+ * derivative is one.
+ */
+static int sk_upd_codes(sk_priv *p, sk_table *tab, const sk_i32 *grad,
+                        sk_u32 rows, sk_u32 cols, int gained, sk_i32 lr24,
+                        sk_i32 trust)
+{
+    sk_fix rowgrad[SK_T_MAXHID];
+    sk_u32 r, j;
+    int moved = 0;
+
+    if (p->mrow == SK_NULL || grad == SK_NULL)
+        return 0;
+    if (cols > (sk_u32)SK_T_MAXHID)
+        return 0;
+
+    for (r = 0; r < rows; r++) {
+        const sk_i32 *acc = grad + r * cols;
+        int any = 0;
+
+        for (j = 0; j < cols; j++) {
+            sk_i32 g = acc[j];
+
+            if (g != 0) {
+                if (p->grad_count > 0)
+                    g /= p->grad_count;
+                if (gained)
+                    g /= SK_GRAD_GAIN;
+                any = 1;
+            }
+            rowgrad[j] = g;
+        }
+        if (!any)
+            continue;               /* nothing flowed through this row */
+
+        if (!sk_shadow_row_load(tab, r, p->mrow))
+            return 0;
+        moved += sk_shadow_step_row(p->mrow, rowgrad, cols, lr24, trust);
+        if (!sk_shadow_row_store(tab, r, p->mrow))
+            return 0;
+    }
+    return moved;
+}
+
 void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust)
 {
     sk_priv *p;
@@ -749,24 +823,39 @@ void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust)
         changed++;
     }
 
-    /* ---- last block feed-forward rows --------------------------- */
-    for (r = 0; r < m->HID; r++) {
-        if (p->g_f1[r] == 0)
-            continue;
-        sk_upd_scale_row(&m->f1[last], (sk_u32)r,
-                         sk_mean_grad(p, p->g_f1[r], 0),
-                         lr24, &p->avg_f1[r], trust,
-                         &sum_before, &sum_after);
-        changed++;
-    }
-    for (r = 0; r < m->D; r++) {
-        if (p->g_f2[r] == 0)
-            continue;
-        sk_upd_scale_row(&m->f2[last], (sk_u32)r,
-                         sk_mean_grad(p, p->g_f2[r], 0),
-                         lr24, &p->avg_f2[r], trust,
-                         &sum_before, &sum_after);
-        changed++;
+    /* ---- last block feed-forward -------------------------------------
+       Two mutually exclusive paths, for the reason spelled out above
+       sk_upd_codes: with trainable codes the row scale is derived, so it
+       cannot also be a free parameter. */
+    if (p->dw_f1 != SK_NULL && p->dw_f2 != SK_NULL) {
+        int moved = 0;
+
+        moved += sk_upd_codes(p, &m->f1[last], p->dw_f1,
+                              (sk_u32)m->HID, (sk_u32)m->D, 1, lr24, trust);
+        moved += sk_upd_codes(p, &m->f2[last], p->dw_f2,
+                              (sk_u32)m->D, (sk_u32)m->HID, 1, lr24, trust);
+        p->codes_changed = moved;
+        if (moved > 0)
+            changed++;
+    } else {
+        for (r = 0; r < m->HID; r++) {
+            if (p->g_f1[r] == 0)
+                continue;
+            sk_upd_scale_row(&m->f1[last], (sk_u32)r,
+                             sk_mean_grad(p, p->g_f1[r], 0),
+                             lr24, &p->avg_f1[r], trust,
+                             &sum_before, &sum_after);
+            changed++;
+        }
+        for (r = 0; r < m->D; r++) {
+            if (p->g_f2[r] == 0)
+                continue;
+            sk_upd_scale_row(&m->f2[last], (sk_u32)r,
+                             sk_mean_grad(p, p->g_f2[r], 0),
+                             lr24, &p->avg_f2[r], trust,
+                             &sum_before, &sum_after);
+            changed++;
+        }
     }
 
     /* ---- gains -------------------------------------------------
@@ -826,6 +915,15 @@ sk_i32 sk_train_grad_row(sk_train *t, int r)
     if (p->grad_count > 0)
         return p->g_emb[r] / p->grad_count;
     return p->g_emb[r];
+}
+
+/* How many weight elements the last update actually moved. Zero is a
+ * meaningful answer and a suspicious one: at a small learning rate in Q8.24
+ * it can mean "the step is below the master's resolution", which is the
+ * failure this whole design exists to avoid. */
+int sk_train_codes_changed(sk_train *t)
+{
+    return (t == SK_NULL || t->priv == SK_NULL) ? 0 : sk_p(t)->codes_changed;
 }
 
 sk_i32 sk_train_drift(sk_train *t)

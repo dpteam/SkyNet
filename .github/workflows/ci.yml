@@ -331,6 +331,29 @@ jobs:
           ./skynet shadow tests/fixtures/TINY.BIN
           ./skynet shadow tests/fixtures/TINY.BIN --bits 4
 
+      - name: training the weights moves them and improves the loss
+        run: |
+          set -e
+          # Three claims, and a training loop is only worth having if all
+          # three hold:
+          #
+          #   1. the weights MOVE - the exact failure this design exists to
+          #      avoid is a step below the master's resolution, which moves
+          #      nothing while the loss merely stops falling;
+          #   2. the loss on the trained example goes DOWN, over one step and
+          #      over eleven - a sign error rises, a wrong scale diverges;
+          #   3. the model is still a model: every table round-trips after a
+          #      write, and a trained row still uses the whole code range.
+          #      A row that stores magnitude 3 while claiming 127 has thrown
+          #      away four bits, and the loss will not show it for hundreds
+          #      of steps.
+          cc -O2 -Isrc -o build/codecheck tests/codecheck.c \
+             src/sk_math.c src/sk_arena.c src/sk_clock.c src/sk_vault.c \
+             src/sk_sched.c src/sk_io.c src/sk_mem.c src/sk_tensor.c \
+             src/sk_forward.c src/sk_grad.c src/sk_train.c \
+             src/sk_shadow.c -lm
+          ./build/codecheck tests/fixtures/TINY.BIN tests/fixtures/dataset.txt
+
       - name: the per-weight gradient is structurally sound
         run: |
           set -e

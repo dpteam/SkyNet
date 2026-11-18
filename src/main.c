@@ -51,6 +51,7 @@ typedef struct {
     int    quiet;
     int    durable;
     int    probe;
+    int    codes;
     int    seed_given;
     sk_u32 seed[4];
     int    files;
@@ -110,6 +111,8 @@ static void sk_usage(void)
     printf("  --mem BYTES    arena size               (default 8388608)\n");
     printf("  --durable      fsync snapshots (survives power loss, ~85ms each)\n");
     printf("  --probe        with predict: report every intermediate vector\n");
+    printf("  --codes        with train: train the int8 weights, not just\n");
+    printf("                 their row scales (needs 196 KB more)\n");
     printf("  --seed A,B,C,D rng seed (four hex or decimal words)\n");
     printf("  --quiet        do not echo primes to stdout\n");
     printf("  --help         this text\n");
@@ -578,12 +581,14 @@ static int cmd_train(const sk_opts *o)
         return 6;
     }
 
-    /* No per-weight buffers: this path trains row scales only, and the
-       196 KB they cost is not something a 640 KB machine should give
-       away for nothing. */
-    tneed = sk_train_bytes(&m, 0);
+    /* The per-weight buffers cost 196 KB, so they are only asked for when
+       the caller asked for code training. Paying for them in the row-scale
+       path would be 196 KB a 640 KB machine gives away for nothing. */
+    tneed = sk_train_bytes(&m, o->codes ? SK_TRAIN_CODES : 0);
     tstore = sk_arena_alloc(&arena, tneed);
-    if (tstore == SK_NULL || !sk_train_open(&tr, &m, tstore, tneed, 0)) {
+    if (tstore == SK_NULL
+        || !sk_train_open(&tr, &m, tstore, tneed,
+                          o->codes ? SK_TRAIN_CODES : 0)) {
         printf("[sky] cannot open the trainer (%lu bytes)\n",
                (unsigned long)tneed);
         sk_arena_done(&arena);
@@ -592,6 +597,8 @@ static int cmd_train(const sk_opts *o)
 
     printf("[sky] training %s on %s, lr=%ld/16777216, epochs=%d\n",
            path, data, (long)o->lr, o->epochs);
+    if (o->codes)
+        printf("[sky] training the int8 weights as well as the row scales\n");
 
     for (epoch = 0; epoch < o->epochs; epoch++) {
         FILE *df = fopen(data, "r");
@@ -736,13 +743,19 @@ static int cmd_train(const sk_opts *o)
                 }
                 fclose(ef);
             }
-            if (evn > 0)
-                printf("[sky] epoch %d: %d examples, loss %ld.%04ld, drift %ld\n",
+            if (evn > 0) {
+                printf("[sky] epoch %d: %d examples, loss %ld.%04ld, drift %ld",
                        epoch + 1, evn,
                        (long)((ev / evn) >> 16),
                        (long)((((ev / evn) & 0xFFFFL) * 10000L) >> 16),
                        (long)sk_train_drift(&tr));
-            else
+                /* Saying how many weights actually moved is the difference
+                   between "the loss barely fell" and "the step is below the
+                   resolution and nothing happened at all". */
+                if (o->codes)
+                    printf(", weights moved %d", sk_train_codes_changed(&tr));
+                printf("\n");
+            } else
                 printf("[sky] epoch %d: %d examples, loss %ld.%04ld\n",
                        epoch + 1, count,
                        (long)((sum / count) >> 16),
@@ -1428,6 +1441,7 @@ int main(int argc, char **argv)
     o.epochs = 1;
     o.lr = 16777;   /* 0.001 in Q8.24; measured best of 1e-5 .. 0.25 */
     o.probe = 0;
+    o.codes = 0;
     o.trust = 167772;  /* 0.01 in Q8.24: at most 1% of the scale per step */
     o.arena_bytes = 8UL * 1024UL * 1024UL;
 
@@ -1465,6 +1479,8 @@ int main(int argc, char **argv)
             o.creativity = (int)strtol(argv[++i], SK_NULL, 10);
         } else if (strcmp(a, "--probe") == 0) {
             o.probe = 1;
+        } else if (strcmp(a, "--codes") == 0) {
+            o.codes = 1;
         } else if (strcmp(a, "--durable") == 0) {
             o.durable = 1;
         } else if (strcmp(a, "--seed") == 0 && i + 1 < argc) {
