@@ -41,6 +41,7 @@ typedef struct {
     int      T;
     sk_fix   last_loss;
     sk_i32   drift;
+    int      grad_count;
     sk_i32   avg[SK_T_VOCAB];
 } sk_priv;
 
@@ -146,6 +147,7 @@ void sk_train_zero_grads(sk_train *t)
         return;
     p = sk_p(t);
     memset(p->g_emb, 0, (size_t)SK_T_VOCAB * sizeof(sk_i32));
+    p->grad_count = 0;
 }
 
 /* Run the network over the sequence and keep hf and logits.
@@ -306,9 +308,24 @@ sk_fix sk_train_grads(sk_train *t, const int *tokens, int ntok,
                 return 0;
             }
             for (r = 0; r < SK_T_VOCAB; r++) {
-                p->g_emb[r] += sk_fix_mul(p->dlogits[tt * SK_T_VOCAB + r],
+                /* Shift BEFORE the multiply, not after.
+                 *
+                 * sk_fix_mul(dlogits, dot) computes (D*2^24)*(dot*2^16)>>16
+                 * = D*dot*2^24. For a large-dot row that intermediate is
+                 * around 3e11, which overflows int32 and saturates at
+                 * SK_FIX_MAX - and then shifting right by 8 produces exactly
+                 * 128.0, a number that looks plausible and is completely
+                 * wrong. The numerical checker showed two rows reporting
+                 * "+25.599991" and "-25.599991": the same saturated value
+                 * with different signs.
+                 *
+                 * Pre-shifting dlogits by 8 gives D*2^16, and the product
+                 * (D*2^16)*(dot*2^16)>>16 = D*dot*2^16, which is Q16.16 and
+                 * fits with two orders of magnitude to spare. */
+                p->g_emb[r] += sk_fix_mul(p->dlogits[tt * SK_T_VOCAB + r] >> 8,
                                           dot[r]);
             }
+            p->grad_count++;
         }
         (void)i;
     }
@@ -332,13 +349,21 @@ void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust)
 
     for (r = 0; r < SK_T_VOCAB; r++) {
         sk_fix sc, after;
+        sk_i32 g;
 
         if (p->g_emb[r] == 0)
             continue;
         if (!sk_table_scale_read(&m->out, (sk_u32)r, &sc))
             continue;
-        after = sk_g24_apply_rms(sc, p->g_emb[r], lr24,
-                                 &p->avg[r], trust);
+
+        /* The loss is a MEAN over the answer positions, so the gradient is
+           a mean too. Accumulating a plain sum made every row's gradient
+           n times too large, which the numerical checker showed directly:
+           dividing the analytic value by the position count brought it into
+           agreement with the measured derivative. */
+        g = (p->grad_count > 0) ? (p->g_emb[r] / p->grad_count) : p->g_emb[r];
+
+        after = sk_g24_apply_rms(sc, g, lr24, &p->avg[r], trust);
         sk_table_scale_write(&m->out, (sk_u32)r, after);
         sum_before += sc;
         sum_after += after;
@@ -350,6 +375,23 @@ void sk_train_update(sk_train *t, sk_i32 lr24, sk_i32 trust)
     if (changed > 0)
         p->drift = sum_after - sum_before;
     sk_train_zero_grads(t);
+}
+
+sk_i32 sk_train_grad_row(sk_train *t, int r)
+{
+    sk_priv *p;
+
+    if (t == SK_NULL || t->priv == SK_NULL || r < 0 || r >= SK_T_VOCAB)
+        return 0;
+    p = sk_p(t);
+    /* Returned RAW in Q16.16, not converted to Q8.24.
+       sk_g24_from16 only handles values up to 128 (it saturates above
+       SK_FIX_MAX>>8), and a large-dot row reaches 283: converting here hid
+       that as a plausible-looking -128.000000. The caller decides how to
+       scale. */
+    if (p->grad_count > 0)
+        return p->g_emb[r] / p->grad_count;
+    return p->g_emb[r];
 }
 
 sk_i32 sk_train_drift(sk_train *t)
