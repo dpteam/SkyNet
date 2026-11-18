@@ -119,6 +119,7 @@ SkyNet/
 | [docs/01-architecture.md](docs/01-architecture.md) | архитектура, инварианты, вехи |
 | [docs/02-ci.md](docs/02-ci.md) | что CI ловит и какие баги уже нашёл |
 | [docs/03-memory.md](docs/03-memory.md) | EMS и как DOS перестаёт быть 64-килобайтным |
+| [docs/04-model.md](docs/04-model.md) | загрузка TINY.BIN: float без float, 38-битная арифметика |
 | [docs/10-self-training.md](docs/10-self-training.md) | самообучение на ФС: 6 способов убить систему и 6 инвариантов |
 | [docs/11-babel.md](docs/11-babel.md) | Вавилонская библиотека: почему данных всегда хватает |
 | [docs/20-ideas.md](docs/20-ideas.md) | бэклог идей с привязкой к рискам |
@@ -132,6 +133,7 @@ SkyNet/
 | Краш-тест | **2 290 249 простых, 0 расхождений** | 15 убийств процесса |
 | **16-бит DOS** | **47 КБ `.exe`, 38/38, восстановление работает** | DOSBox, `tests/dos_test.sh` |
 | **EMS на DOS** | **15 168 КБ страничной памяти** | `skynet mem` в DOSBox |
+| **TINY.BIN на DOS** | **384 КБ в 24 EMS-страницах, CRC MATCH** | `skynet model TINY.BIN` |
 | Компиляторы | gcc, clang, tcc, OpenWatcom (16-бит) | 0 предупреждений при `-Wall -Wextra -pedantic` |
 | Цена fsync | **85 мс** против **0.1 мс** работы | `tests/bench_io.c` |
 
@@ -142,6 +144,8 @@ DOS-цифры не «собралось», а «запустилось и пр�
 [sky] resumed at prime #20000 = 224737 (seq 55) <- восстановление на DOS
 ems   : v4.0  frame 57344h  free 948/1024 pages (15168 KB free)
 pool: 48 KB in 3 EMS pages, 6 maps, 287 reads, 194 writes
+[sky] weights in EMS: 384 KB in 24 pages        <- модель на 16-бит DOS
+[sky] weights crc  load 1B0E71FA  store 1B0E71FA  MATCH
 lines: 25000  last value: 287117  mismatches: 0
 ```
 
@@ -149,6 +153,10 @@ lines: 25000  last value: 287117  mismatches: 0
 продолжила работать — это инвариант I6 в действии, а не на словах.
 А 15 МБ через EMS означают, что 380 КБ весов Tiny-2.1 влезают с запасом
 в 40 раз: потолок в 64 КБ больше не ограничивает модель.
+
+Модель загружается на DOS и даёт **тот же результат**, что и на x86_64:
+CRC весов совпадает, матвек `4.771` против float-эталона `4.783` — это
+квантование масштаба в 16 бит, а не ошибка.
 
 Последняя строка про fsync — причина, по которой durability-политика
 вынесена наружу явным флагом `--durable`, а не спрятана внутри библиотеки.
